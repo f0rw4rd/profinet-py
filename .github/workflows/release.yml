@@ -1,0 +1,213 @@
+# ============================================================================
+# Release Pipeline — profinet-py
+# ============================================================================
+#
+# Security hardening applied:
+#   - Top-level permissions: {} (deny all by default)
+#   - All actions pinned to full commit SHA (prevents tag-force-push attacks)
+#   - OIDC trusted publishing for PyPI (no long-lived API tokens)
+#   - Build and publish are separate jobs (build has no secret access)
+#   - Publish job uses 'pypi' environment with approval protection
+#   - Artifact attestation for supply chain integrity (SLSA)
+#   - Checksum verification between build and publish jobs
+#   - No pip install in publish job (avoids arbitrary code execution)
+#   - persist-credentials: false on all checkouts
+#
+# Required GitHub configuration:
+#   1. Create 'pypi' environment with required reviewers
+#   2. Configure PyPI trusted publisher:
+#      - Owner: f0rw4rd
+#      - Repository: profinet-py
+#      - Workflow: release.yml
+#      - Environment: pypi
+#   3. No API token needed — OIDC trusted publishing only
+#
+# ============================================================================
+
+name: Release to PyPI
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (build only, skip publish)"
+        required: false
+        default: "false"
+        type: boolean
+
+# Deny all permissions by default — each job grants only what it needs
+permissions: {}
+
+# Only one release at a time — prevent parallel tag pushes from colliding
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false  # Never cancel an in-flight release
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  # ── Gate: reuse CI workflow ─────────────────────────────────────
+  quality:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  # ── Build sdist + wheel ─────────────────────────────────────────
+  # This job has NO access to secrets — artifacts are built in isolation
+  build:
+    name: Build
+    needs: [quality]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # Checkout only — no secrets needed for building
+    outputs:
+      # Pass checksums to publish job for verification
+      sha256-sdist: ${{ steps.checksums.outputs.sdist }}
+      sha256-wheel: ${{ steps.checksums.outputs.wheel }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: |
+          pip install --only-binary :all: build
+
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          PKG_VERSION="$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match pyproject.toml version ($PKG_VERSION)"
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Verify distributions
+        run: |
+          pip install --only-binary :all: twine
+          twine check dist/*
+
+      - name: Generate and export checksums
+        id: checksums
+        run: |
+          echo "── SHA-256 checksums ──"
+          sha256sum dist/*
+          # Export checksums as outputs for cross-job verification
+          echo "sdist=$(sha256sum dist/*.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "wheel=$(sha256sum dist/*.whl | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: List artifacts
+        run: ls -lh dist/
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 5
+
+  # ── Attestation ─────────────────────────────────────────────────
+  # Generates SLSA build provenance attestation for supply chain security
+  attest:
+    name: Attest provenance
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # Required for attestation signing
+      attestations: write  # Required to persist attestations
+      contents: read
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f  # v3.2.0
+        with:
+          subject-path: "dist/*"
+
+  # ── Publish to PyPI ─────────────────────────────────────────────
+  # Uses OIDC trusted publishing — no long-lived secrets needed.
+  # No pip install here — avoids arbitrary code execution in the publish job.
+  publish:
+    name: Publish to PyPI
+    needs: [build, attest]
+    if: >-
+      startsWith(github.ref, 'refs/tags/v')
+      && !(github.event.inputs.dry_run == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # Required for OIDC trusted publishing
+      contents: read
+    environment:
+      name: pypi  # Requires approval — configure reviewers in GitHub settings
+      url: https://pypi.org/project/profinet-py/
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Verify artifact checksums (anti-tampering)
+        env:
+          EXPECTED_SDIST: ${{ needs.build.outputs.sha256-sdist }}
+          EXPECTED_WHEEL: ${{ needs.build.outputs.sha256-wheel }}
+        run: |
+          echo "── Verifying SHA-256 checksums against build job ──"
+          ACTUAL_SDIST="$(sha256sum dist/*.tar.gz | cut -d' ' -f1)"
+          ACTUAL_WHEEL="$(sha256sum dist/*.whl | cut -d' ' -f1)"
+          echo "sdist: expected=$EXPECTED_SDIST actual=$ACTUAL_SDIST"
+          echo "wheel: expected=$EXPECTED_WHEEL actual=$ACTUAL_WHEEL"
+          if [ "$EXPECTED_SDIST" != "$ACTUAL_SDIST" ]; then
+            echo "::error::sdist checksum mismatch — artifact may have been tampered with"
+            exit 1
+          fi
+          if [ "$EXPECTED_WHEEL" != "$ACTUAL_WHEEL" ]; then
+            echo "::error::wheel checksum mismatch — artifact may have been tampered with"
+            exit 1
+          fi
+          echo "Checksums verified successfully"
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e  # v1.13.0
+
+  # ── GitHub Release ──────────────────────────────────────────────
+  github-release:
+    name: GitHub Release
+    needs: [publish]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required to create releases and upload assets
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b  # v2.5.0
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*

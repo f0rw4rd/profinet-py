@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Block commits with AI co-author lines
+if grep -qiE "Co-Authored-By:.*(Claude|anthropic)" "$1"; then
+    echo "ERROR: commit message contains Claude/Anthropic co-author line. Remove it." >&2
+    exit 1
+fi

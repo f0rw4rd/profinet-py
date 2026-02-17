@@ -1,0 +1,503 @@
+"""
+PROFINET IO-Controller Library
+
+A Python library for PROFINET IO communication, supporting:
+- DCP (Discovery and Configuration Protocol) for device discovery
+- DCE/RPC for acyclic parameter read/write operations
+- IM0/IM1 device identification data access
+
+This library acts as an IO-Controller, allowing connection to and
+communication with PROFINET IO-Devices.
+
+Author: f0rw4rd
+https://github.com/f0rw4rd/profinet-py
+"""
+
+from . import blocks, indices
+from .alarm_listener import (
+    AlarmEndpoint,
+    AlarmListener,
+)
+from .alarms import (
+    # Alarm item types
+    AlarmItem,
+    # Alarm notification
+    AlarmNotification,
+    DiagnosisItem,
+    MaintenanceItem,
+    PE_AlarmItem,
+    PRAL_AlarmItem,
+    RS_AlarmItem,
+    UploadRetrievalItem,
+    iParameterItem,
+    parse_alarm_item,
+    # Parsing functions
+    parse_alarm_notification,
+)
+from .blocks import (
+    # Data classes for block parsing
+    BlockHeader,
+    ExpectedSubmodule,
+    ExpectedSubmoduleAPI,
+    # ExpectedSubmodule
+    ExpectedSubmoduleBlockReq,
+    ExpectedSubmoduleDataDescription,
+    IODWriteMultipleBuilder,
+    # ModuleDiff
+    ModuleDiffBlock,
+    ModuleDiffModule,
+    ModuleDiffSubmodule,
+    PDRealData,
+    PeerInfo,
+    RealIdentificationData,
+    SlotInfo,
+    # WriteMultiple
+    WriteMultipleResult,
+    # Parsing functions
+    parse_block_header,
+    parse_module_diff_block,
+    parse_multiple_block_header,
+    parse_pd_interface_data_real,
+    parse_pd_port_data_real,
+    parse_pd_real_data,
+    parse_port_statistics,
+    parse_real_identification_data,
+    parse_write_multiple_response,
+)
+from .cyclic import (
+    CyclicController,
+    CyclicState,
+    CyclicStats,
+)
+from .dcp import (
+    DCP_BLOCK_ERROR_IN_OPERATION,
+    DCP_BLOCK_ERROR_NAMES,
+    DCP_BLOCK_ERROR_OK,
+    DCP_BLOCK_ERROR_OPTION_UNSUPPORTED,
+    DCP_BLOCK_ERROR_RESOURCE,
+    DCP_BLOCK_ERROR_SET_NOT_POSSIBLE,
+    DCP_BLOCK_ERROR_SUBOPTION_NOT_SET,
+    DCP_BLOCK_ERROR_SUBOPTION_UNSUPPORTED,
+    DCP_GET_SET_FRAME_ID,
+    DCP_HELLO_FRAME_ID,
+    # Frame IDs
+    DCP_IDENTIFY_REQUEST_FRAME_ID,
+    DCP_IDENTIFY_RESPONSE_FRAME_ID,
+    # Options
+    DCP_MAX_NAME_LENGTH,
+    DCP_OPTION_ALL,
+    DCP_OPTION_CONTROL,
+    DCP_OPTION_DEVICE,
+    DCP_OPTION_DEVICE_INITIATIVE,
+    DCP_OPTION_DHCP,
+    DCP_OPTION_IP,
+    DCP_OPTION_MANUF_MAX,
+    # Manufacturer options
+    DCP_OPTION_MANUF_MIN,
+    DCP_OPTION_NME,
+    DCP_OPTION_RESERVED,
+    # Service IDs
+    DCP_SERVICE_ID_GET,
+    DCP_SERVICE_ID_HELLO,
+    DCP_SERVICE_ID_IDENTIFY,
+    DCP_SERVICE_ID_SET,
+    # Service Types
+    DCP_SERVICE_TYPE_REQUEST,
+    DCP_SERVICE_TYPE_RESPONSE_SUCCESS,
+    DCP_SERVICE_TYPE_RESPONSE_UNSUPPORTED,
+    # Device Initiative suboption
+    DCP_SUBOPTION_DEVICE_INITIATIVE,
+    DCP_SUBOPTION_DHCP_CLASS_ID,
+    DCP_SUBOPTION_DHCP_CLIENT_ID,
+    DCP_SUBOPTION_DHCP_CONTROL,
+    DCP_SUBOPTION_DHCP_FQDN,
+    # DHCP suboptions
+    DCP_SUBOPTION_DHCP_HOSTNAME,
+    DCP_SUBOPTION_DHCP_PARAM_REQ,
+    DCP_SUBOPTION_DHCP_SERVER_ID,
+    DCP_SUBOPTION_DHCP_UUID,
+    DCP_SUBOPTION_DHCP_VENDOR_SPEC,
+    RESET_MODE_ALL_DATA,
+    RESET_MODE_APPLICATION,
+    # Legacy reset modes
+    RESET_MODE_COMMUNICATION,
+    RESET_MODE_DEVICE,
+    RESET_MODE_ENGINEERING,
+    RESET_MODE_FACTORY,
+    BlockQualifier,
+    # Classes
+    DCPDeviceDescription,
+    DCPDHCPBlock,
+    DCPResponseCode,
+    DeviceInitiative,
+    IPBlockInfo,
+    ResetQualifier,
+    get_param,
+    read_response,
+    receive_hello,
+    reset_to_factory,
+    # Functions
+    send_discover,
+    send_hello,
+    send_request,
+    set_ip,
+    set_param,
+    signal_device,
+)
+from .device import (
+    DeviceInfo,
+    ProfinetDevice,
+    WriteItem,
+    scan,
+    scan_dict,
+)
+from .diagnosis import (
+    # Constants
+    CHANNEL_ERROR_TYPES,
+    EXT_CHANNEL_ERROR_TYPES_MAP,
+    ChannelAccumulative,
+    ChannelDiagnosis,
+    ChannelDirection,
+    ChannelProperties,
+    ChannelSpecifier,
+    ChannelType,
+    # Diagnosis data classes
+    DiagnosisData,
+    ExtChannelDiagnosis,
+    QualifiedChannelDiagnosis,
+    # Enums
+    UserStructureIdentifier,
+    decode_channel_error_type,
+    decode_ext_channel_error_type,
+    # Parsing functions
+    parse_diagnosis_block,
+    parse_diagnosis_simple,
+)
+from .exceptions import (
+    DCPDeviceNotFoundError,
+    DCPError,
+    DCPTimeoutError,
+    InvalidIPError,
+    InvalidMACError,
+    PermissionDeniedError,
+    PNIOError,
+    ProfinetError,
+    RPCConnectionError,
+    RPCError,
+    RPCFaultError,
+    RPCTimeoutError,
+    SocketError,
+    ValidationError,
+)
+from .gsdml import (
+    GSDMLDAP,
+    GSDMLDevice,
+    GSDMLModule,
+    GSDMLSubmodule,
+    load_gsdml,
+    parse_gsdml,
+)
+from .protocol import (
+    EthernetHeader,
+    EthernetVLANHeader,
+    IPConfiguration,
+    PNARBlockRequest,
+    PNBlockHeader,
+    PNDCPBlock,
+    PNDCPBlockRequest,
+    PNDCPHeader,
+    PNInM0,
+    PNInM1,
+    PNInM2,
+    PNInM3,
+    PNInM4,
+    PNInM5,
+    PNIODHeader,
+    PNIODReleaseBlock,
+    PNNRDData,
+    PNRPCHeader,
+)
+from .rpc import (
+    MAU_TYPES,
+    PNIO_DEVICE_INTERFACE_VERSION,
+    # Python timing constants
+    PYTHON_MIN_CYCLE_TIME_MS,
+    PYTHON_SAFE_CYCLE_TIME_MS,
+    RPC_BIND_PORT,
+    # RPC Constants
+    RPC_PORT,
+    UUID_EPM_V4,
+    UUID_NULL,
+    UUID_PNIO_CONTROLLER,
+    UUID_PNIO_DEVICE,
+    ARInfo,
+    ConnectResult,
+    DiagnosisEntry,
+    EPMEndpoint,
+    InterfaceInfo,
+    IOCRSetup,
+    # IOCR setup classes
+    IOSlot,
+    LinkData,
+    LogEntry,
+    PortInfo,
+    # Data classes
+    PortStatistics,
+    RPCCon,
+    epm_lookup,
+    get_station_info,
+)
+from .rt import (
+    IOCR_TYPE_INPUT,
+    IOCR_TYPE_OUTPUT,
+    IOXS_BAD,
+    IOXS_GOOD,
+    RT_CLASS_1,
+    CyclicDataBuilder,
+    IOCRConfig,
+    IODataObject,
+    RTFrame,
+    build_iocr_configs,
+)
+from .util import (
+    ethernet_socket,
+    get_mac,
+    ip2s,
+    mac2s,
+    s2ip,
+    s2mac,
+    to_hex,
+    udp_socket,
+)
+from .vendors import (
+    get_vendor_name,
+    lookup_vendor,
+    profinet_vendor_map,
+)
+
+__version__ = "0.6.0"
+__all__ = [
+    # Protocol structures
+    "EthernetHeader",
+    "EthernetVLANHeader",
+    "PNDCPHeader",
+    "PNDCPBlock",
+    "PNDCPBlockRequest",
+    "IPConfiguration",
+    "PNRPCHeader",
+    "PNNRDData",
+    "PNIODHeader",
+    "PNBlockHeader",
+    "PNARBlockRequest",
+    "PNIODReleaseBlock",
+    "PNInM0",
+    "PNInM1",
+    "PNInM2",
+    "PNInM3",
+    "PNInM4",
+    "PNInM5",
+    # DCP classes
+    "DCPDeviceDescription",
+    "DCPResponseCode",
+    "DCPDHCPBlock",
+    "IPBlockInfo",
+    "BlockQualifier",
+    "ResetQualifier",
+    "DeviceInitiative",
+    # DCP functions
+    "send_discover",
+    "send_request",
+    "read_response",
+    "send_hello",
+    "receive_hello",
+    "get_param",
+    "set_param",
+    "set_ip",
+    "signal_device",
+    "reset_to_factory",
+    # DCP Frame IDs
+    "DCP_IDENTIFY_REQUEST_FRAME_ID",
+    "DCP_IDENTIFY_RESPONSE_FRAME_ID",
+    "DCP_GET_SET_FRAME_ID",
+    "DCP_HELLO_FRAME_ID",
+    # DCP Service IDs
+    "DCP_SERVICE_ID_GET",
+    "DCP_SERVICE_ID_SET",
+    "DCP_SERVICE_ID_IDENTIFY",
+    "DCP_SERVICE_ID_HELLO",
+    # DCP Service Types
+    "DCP_SERVICE_TYPE_REQUEST",
+    "DCP_SERVICE_TYPE_RESPONSE_SUCCESS",
+    "DCP_SERVICE_TYPE_RESPONSE_UNSUPPORTED",
+    # DCP Options
+    "DCP_MAX_NAME_LENGTH",
+    "DCP_OPTION_IP",
+    "DCP_OPTION_DEVICE",
+    "DCP_OPTION_DHCP",
+    "DCP_OPTION_RESERVED",
+    "DCP_OPTION_CONTROL",
+    "DCP_OPTION_DEVICE_INITIATIVE",
+    "DCP_OPTION_NME",
+    "DCP_OPTION_ALL",
+    "DCP_OPTION_MANUF_MIN",
+    "DCP_OPTION_MANUF_MAX",
+    # DCP DHCP suboptions
+    "DCP_SUBOPTION_DHCP_HOSTNAME",
+    "DCP_SUBOPTION_DHCP_VENDOR_SPEC",
+    "DCP_SUBOPTION_DHCP_SERVER_ID",
+    "DCP_SUBOPTION_DHCP_PARAM_REQ",
+    "DCP_SUBOPTION_DHCP_CLASS_ID",
+    "DCP_SUBOPTION_DHCP_CLIENT_ID",
+    "DCP_SUBOPTION_DHCP_FQDN",
+    "DCP_SUBOPTION_DHCP_UUID",
+    "DCP_SUBOPTION_DHCP_CONTROL",
+    # DCP DeviceInitiative suboption
+    "DCP_SUBOPTION_DEVICE_INITIATIVE",
+    # DCP Block Error codes
+    "DCP_BLOCK_ERROR_OK",
+    "DCP_BLOCK_ERROR_OPTION_UNSUPPORTED",
+    "DCP_BLOCK_ERROR_SUBOPTION_UNSUPPORTED",
+    "DCP_BLOCK_ERROR_SUBOPTION_NOT_SET",
+    "DCP_BLOCK_ERROR_RESOURCE",
+    "DCP_BLOCK_ERROR_SET_NOT_POSSIBLE",
+    "DCP_BLOCK_ERROR_IN_OPERATION",
+    "DCP_BLOCK_ERROR_NAMES",
+    # Reset modes (legacy)
+    "RESET_MODE_COMMUNICATION",
+    "RESET_MODE_APPLICATION",
+    "RESET_MODE_ENGINEERING",
+    "RESET_MODE_ALL_DATA",
+    "RESET_MODE_DEVICE",
+    "RESET_MODE_FACTORY",
+    # RPC
+    "RPCCon",
+    "get_station_info",
+    "epm_lookup",
+    "EPMEndpoint",
+    # IOCR setup classes
+    "IOSlot",
+    "IOCRSetup",
+    "ConnectResult",
+    # Python timing constants
+    "PYTHON_MIN_CYCLE_TIME_MS",
+    "PYTHON_SAFE_CYCLE_TIME_MS",
+    # RPC constants
+    "RPC_PORT",
+    "RPC_BIND_PORT",
+    "UUID_NULL",
+    "UUID_EPM_V4",
+    "UUID_PNIO_DEVICE",
+    "UUID_PNIO_CONTROLLER",
+    "PNIO_DEVICE_INTERFACE_VERSION",
+    # Utilities
+    "ethernet_socket",
+    "udp_socket",
+    "get_mac",
+    "s2mac",
+    "mac2s",
+    "s2ip",
+    "ip2s",
+    "to_hex",
+    # Vendor lookup
+    "profinet_vendor_map",
+    "get_vendor_name",
+    "lookup_vendor",
+    # Diagnosis
+    "DiagnosisData",
+    "ChannelDiagnosis",
+    "ExtChannelDiagnosis",
+    "QualifiedChannelDiagnosis",
+    "ChannelProperties",
+    "UserStructureIdentifier",
+    "ChannelType",
+    "ChannelDirection",
+    "ChannelAccumulative",
+    "ChannelSpecifier",
+    "parse_diagnosis_block",
+    "parse_diagnosis_simple",
+    "decode_channel_error_type",
+    "decode_ext_channel_error_type",
+    "CHANNEL_ERROR_TYPES",
+    "EXT_CHANNEL_ERROR_TYPES_MAP",
+    # Blocks module
+    "BlockHeader",
+    "SlotInfo",
+    "PeerInfo",
+    "PDRealData",
+    "RealIdentificationData",
+    "ModuleDiffBlock",
+    "ModuleDiffModule",
+    "ModuleDiffSubmodule",
+    "WriteMultipleResult",
+    "IODWriteMultipleBuilder",
+    "ExpectedSubmoduleBlockReq",
+    "ExpectedSubmoduleAPI",
+    "ExpectedSubmodule",
+    "ExpectedSubmoduleDataDescription",
+    "parse_block_header",
+    "parse_multiple_block_header",
+    "parse_pd_interface_data_real",
+    "parse_pd_port_data_real",
+    "parse_pd_real_data",
+    "parse_real_identification_data",
+    "parse_port_statistics",
+    "parse_module_diff_block",
+    "parse_write_multiple_response",
+    # Alarms module
+    "AlarmItem",
+    "DiagnosisItem",
+    "MaintenanceItem",
+    "UploadRetrievalItem",
+    "iParameterItem",
+    "PE_AlarmItem",
+    "RS_AlarmItem",
+    "PRAL_AlarmItem",
+    "AlarmNotification",
+    "parse_alarm_notification",
+    "parse_alarm_item",
+    # Alarm listener
+    "AlarmListener",
+    "AlarmEndpoint",
+    # Real-time (cyclic IO)
+    "RTFrame",
+    "IOCRConfig",
+    "IODataObject",
+    "CyclicDataBuilder",
+    "CyclicController",
+    "CyclicState",
+    "CyclicStats",
+    "IOCR_TYPE_INPUT",
+    "IOCR_TYPE_OUTPUT",
+    "RT_CLASS_1",
+    "IOXS_GOOD",
+    "IOXS_BAD",
+    "build_iocr_configs",
+    # GSDML parser
+    "GSDMLDevice",
+    "GSDMLModule",
+    "GSDMLSubmodule",
+    "GSDMLDAP",
+    "load_gsdml",
+    "parse_gsdml",
+    # Device module (high-level API)
+    "ProfinetDevice",
+    "DeviceInfo",
+    "WriteItem",
+    "scan",
+    "scan_dict",
+    # Exceptions
+    "ProfinetError",
+    "DCPError",
+    "DCPTimeoutError",
+    "DCPDeviceNotFoundError",
+    "RPCError",
+    "RPCTimeoutError",
+    "RPCFaultError",
+    "RPCConnectionError",
+    "PNIOError",
+    "ValidationError",
+    "InvalidMACError",
+    "InvalidIPError",
+    "SocketError",
+    "PermissionDeniedError",
+]

@@ -1,0 +1,80 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill out the sections below.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `pip show profinet-py` or git commit hash
+      placeholder: "0.3.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - DCP (discovery/configuration)
+        - DCE/RPC (acyclic read/write)
+        - Cyclic I/O
+        - Alarm handling
+        - CLI tool
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - Windows (Npcap)
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal code or CLI commands to reproduce the issue
+      render: python
+    validations:
+      required: true
+
+  - type: textarea
+    id: device
+    attributes:
+      label: Device / Environment
+      description: Device manufacturer/model, Python version, OS, network interface
+      placeholder: |
+        - Device: Siemens ET 200SP
+        - Python: 3.12.1
+        - OS: Ubuntu 24.04
+        - Interface: eth0
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Wireshark capture
+      description: Paste any error output or attach a pcap
+      render: text
+    validations:
+      required: false

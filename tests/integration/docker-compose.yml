@@ -1,0 +1,41 @@
+# Docker Compose for profinet-py integration tests.
+#
+# Runs a PROFINET IO Device emulator (p-net stack) for testing DCP discovery,
+# RPC read/write, I&M record access, and cyclic IO against a real(ish) device.
+#
+# Usage:
+#   docker compose up --build -d
+#   sudo pytest tests/integration/ -m integration -v
+#   docker compose down
+#
+# Uses a dedicated bridge network so the container has its own network
+# namespace (avoids UDP port conflicts with the host). The host reaches
+# the container via the bridge interface (br-<id>) for both Layer 2
+# (DCP, cyclic RT) and Layer 3 (RPC/UDP) traffic.
+
+services:
+  profinet-device:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.profinet
+    container_name: profinet-test-device
+    hostname: profinet-test-device
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    environment:
+      - PNET_STATION_NAME=test-pn-device
+      - PNET_INTERFACE=eth0
+      - PNET_VERBOSITY=2
+    networks:
+      profinet:
+        ipv4_address: 192.168.99.2
+    restart: "no"
+
+networks:
+  profinet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.99.0/24
+          gateway: 192.168.99.1

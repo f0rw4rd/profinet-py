@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/f0rw4rd/profinet-py/security/advisories/new
+    about: Report security vulnerabilities privately via GitHub Security Advisories
+  - name: Questions / Discussion
+    url: https://github.com/f0rw4rd/profinet-py/discussions
+    about: Ask questions or start a discussion

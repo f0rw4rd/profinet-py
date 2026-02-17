@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "profinet-py"
+version = "0.6.0"
+description = "PROFINET IO-Controller library for Python"
+readme = "README.md"
+license = "GPL-3.0-only"
+requires-python = ">=3.10"
+authors = [
+    {name = "f0rw4rd"},
+]
+maintainers = [
+    {name = "f0rw4rd"},
+]
+keywords = [
+    "profinet",
+    "industrial",
+    "ics",
+    "ot",
+    "plc",
+    "automation",
+    "siemens",
+    "dcp",
+    "rpc",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Networking",
+    "Topic :: Scientific/Engineering",
+    "Typing :: Typed",
+]
+dependencies = [
+    "construct>=2.10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.15.0",
+    "vulture>=2.14",
+    "bandit>=1.9.3",
+    "pre-commit>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/f0rw4rd/profinet-py"
+Repository = "https://github.com/f0rw4rd/profinet-py"
+Issues = "https://github.com/f0rw4rd/profinet-py/issues"
+
+[project.scripts]
+profinet = "profinet.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["profinet*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "C4", "UP"]
+ignore = ["E501", "E402", "UP006", "UP007", "UP035", "UP038", "UP045"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.vulture]
+paths = ["profinet"]
+min_confidence = 80
+exclude = []
+
+[tool.bandit]
+targets = ["profinet"]
+skips = ["B101"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+markers = [
+    "integration: Integration tests requiring Docker + root (deselected by default)",
+]
+addopts = "-m 'not integration'"

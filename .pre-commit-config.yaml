@@ -1,0 +1,45 @@
+repos:
+  - repo: local
+    hooks:
+      # --- pre-commit: fast static checks (seconds) ---
+      - id: ruff
+        name: ruff lint
+        entry: ruff check --fix
+        language: system
+        types: [python]
+        stages: [pre-commit]
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format
+        language: system
+        types: [python]
+        stages: [pre-commit]
+      - id: vulture
+        name: dead code detection (vulture)
+        entry: vulture profinet/ vulture_whitelist.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+      # --- pre-push: security + tests ---
+      - id: bandit
+        name: security lint (bandit)
+        entry: bandit -c pyproject.toml -r profinet/
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+      - id: tests
+        name: unit tests
+        entry: python -m pytest tests/ -x -q
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+      # --- commit-msg ---
+      - id: no-ai-coauthor
+        name: block AI co-author lines
+        entry: .githooks/no-ai-coauthor
+        language: script
+        always_run: true
+        stages: [commit-msg]

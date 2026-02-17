@@ -1,0 +1,25 @@
+#!/bin/bash
+# PROFINET LED handler for Docker environment
+# The p-net sample app calls this script to control LEDs.
+# In Docker, we just log the LED state changes.
+
+LED_ID=$1
+LED_STATE=$2
+
+if [ "${LED_ID}" = "0" ]; then
+    LED_NAME="PROFINET Signal LED"
+elif [ "${LED_ID}" = "1" ]; then
+    LED_NAME="Application LED"
+else
+    LED_NAME="LED ${LED_ID}"
+fi
+
+if [ "${LED_STATE}" = "1" ]; then
+    echo "[LED] ${LED_NAME}: ON"
+else
+    echo "[LED] ${LED_NAME}: OFF"
+fi
+
+# Write state to file for inspection
+mkdir -p /var/lib/pnet/leds
+echo "${LED_STATE}" > "/var/lib/pnet/leds/led_${LED_ID}"

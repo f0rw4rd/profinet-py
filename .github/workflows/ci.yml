@@ -1,0 +1,161 @@
+# ============================================================================
+# CI Pipeline — profinet-py
+# ============================================================================
+#
+# Security hardening applied:
+#   - Top-level permissions: {} (deny all by default)
+#   - All actions pinned to full SHA (prevents tag-force-push attacks)
+#   - No pull_request_target (prevents PWN request attacks)
+#   - PR jobs have read-only permissions (no write access on untrusted code)
+#   - Concurrency groups cancel redundant runs
+#   - PYTHONUTF8 and PYTHONDONTWRITEBYTECODE set globally
+#
+# Recommended branch protection rules for 'main':
+#   1. Require pull request reviews before merging (1+ approvals)
+#   2. Require status checks to pass: lint, format, test, collect, security
+#   3. Require branches to be up to date before merging
+#   4. Require signed commits
+#   5. Do not allow bypassing the above settings
+#   6. Restrict force pushes and deletions
+#
+# ============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]  # Only main branch — feature branches tested via PR
+  pull_request:
+    branches: [main]
+  workflow_call:         # Reusable by release.yml
+
+# Deny all permissions by default — each job grants only what it needs
+permissions: {}
+
+# Cancel redundant runs: same branch/PR only keeps the latest
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"              # Consistent encoding across platforms
+  PYTHONDONTWRITEBYTECODE: "1"  # No .pyc files in CI (cleaner, faster)
+
+jobs:
+  # ── Lint ─────────────────────────────────────────────────────────
+  lint:
+    name: Lint (ruff check)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # Checkout only
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false  # Don't leak GITHUB_TOKEN to later steps
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: |
+          pip install --only-binary :all: "ruff>=0.15.0"
+
+      - name: Run ruff check
+        run: ruff check profinet/
+
+  # ── Format ───────────────────────────────────────────────────────
+  format:
+    name: Format (ruff format --check)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: |
+          pip install --only-binary :all: "ruff>=0.15.0"
+
+      - name: Run ruff format --check
+        run: ruff format --check profinet/
+
+  # ── Test ─────────────────────────────────────────────────────────
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false  # Run all matrix entries even if one fails
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package with test dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run pytest
+        run: pytest -v
+
+  # ── Test Collection Sanity ───────────────────────────────────────
+  collect:
+    name: Test collection sanity
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install package with test dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Verify test collection
+        run: pytest --collect-only -q
+
+  # ── Security & Quality ──────────────────────────────────────────
+  security:
+    name: Security & dead code
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install security tools
+        run: |
+          pip install --only-binary :all: "vulture>=2.14" "bandit>=1.9.3"
+
+      - name: Install package (needed for import resolution)
+        run: pip install -e .
+
+      - name: Vulture (dead code detection)
+        run: vulture profinet/ vulture_whitelist.py
+
+      - name: Bandit (security linter)
+        run: bandit -c pyproject.toml -r profinet/

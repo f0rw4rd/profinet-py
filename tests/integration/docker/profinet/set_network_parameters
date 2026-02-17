@@ -1,0 +1,15 @@
+#!/bin/bash
+# PROFINET network parameter handler for Docker environment
+# The p-net stack calls this script to configure network parameters.
+# In Docker, the network is already configured by the container runtime,
+# so we just log the requested parameters.
+
+echo "[NET] Network parameter change requested:"
+echo "  Interface: $1"
+echo "  IP: $2"
+echo "  Netmask: $3"
+echo "  Gateway: $4"
+echo "  Station: $5"
+echo "  Permanent: $6"
+echo "[NET] Skipping - network managed by Docker"
+exit 0

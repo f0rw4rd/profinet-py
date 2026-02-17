@@ -1,0 +1,64 @@
+name: Device Compatibility Report
+description: Report a device that doesn't work or needs special handling
+labels: ["device-compat", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Help us improve device compatibility by reporting devices that don't work as expected.
+
+  - type: input
+    id: manufacturer
+    attributes:
+      label: Device manufacturer
+      placeholder: "e.g. Siemens, Phoenix Contact, Wago"
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Device model
+      placeholder: "e.g. ET 200SP, AXL F BK PN"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: what_fails
+    attributes:
+      label: What fails?
+      options:
+        - DCP discovery (device not found)
+        - DCP set (IP/name assignment)
+        - RPC connect (AR establishment)
+        - Acyclic read/write
+        - Cyclic I/O exchange
+        - LED identification
+        - Factory reset
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happens vs what you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: gsdml
+    attributes:
+      label: GSDML file
+      description: Paste relevant parts or attach the GSDML file
+    validations:
+      required: false
+
+  - type: textarea
+    id: pcap
+    attributes:
+      label: Wireshark capture
+      description: Attach a pcap showing the failed communication
+    validations:
+      required: false

@@ -140,6 +140,29 @@ def cmd_read(args: argparse.Namespace) -> int:
         sock.close()
 
 
+def cmd_write(args: argparse.Namespace) -> int:
+    """Execute write command."""
+    sock = ethernet_socket(args.interface, 3)
+    try:
+        src = get_mac(args.interface)
+
+        print(f"Connecting to {args.target}...")
+        info = rpc.get_station_info(sock, src, args.target)
+
+        with rpc.RPCCon(info) as conn:
+            conn.connect(src)
+
+            idx = int(args.index, 16) if args.index.startswith("0x") else int(args.index)
+            data = bytes.fromhex(args.data.replace(" ", ""))
+            conn.write(api=args.api, slot=args.slot, subslot=args.subslot, idx=idx, data=data)
+
+            print(f"Wrote {len(data)} bytes to slot={args.slot} subslot={args.subslot} index=0x{idx:04X}")
+
+        return 0
+    finally:
+        sock.close()
+
+
 def cmd_read_inm0_filter(args: argparse.Namespace) -> int:
     """Execute read-inm0-filter command."""
     sock = ethernet_socket(args.interface, 3)
@@ -629,6 +652,16 @@ def create_parser() -> argparse.ArgumentParser:
     sub.add_argument("--subslot", type=int, required=True, help="Subslot number")
     sub.add_argument("--index", required=True, help="Record index (hex with 0x prefix)")
     sub.set_defaults(func=cmd_read)
+
+    # write
+    sub = subparsers.add_parser("write", help="Write data record")
+    sub.add_argument("target", metavar="NAME", help="Station name (e.g. my-device)")
+    sub.add_argument("--api", type=int, default=0, help="API (default: 0)")
+    sub.add_argument("--slot", type=int, required=True, help="Slot number")
+    sub.add_argument("--subslot", type=int, required=True, help="Subslot number")
+    sub.add_argument("--index", required=True, help="Record index (hex with 0x prefix, e.g. 0xAFF1)")
+    sub.add_argument("data", metavar="HEX", help="Data to write as hex string (e.g. deadbeef)")
+    sub.set_defaults(func=cmd_write)
 
     # read-inm0-filter
     sub = subparsers.add_parser("read-inm0-filter", help="Read device topology")

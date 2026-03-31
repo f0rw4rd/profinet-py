@@ -1008,6 +1008,115 @@ def _build_rpc_bytes(packet_type=0x02, operation_number=0x02, payload=b""):
     return hdr + payload
 
 
+def _build_rpc_bytes_le(packet_type=0x02, operation_number=0x02, payload=b""):
+    """Build PNRPCHeader bytes with little-endian DREP (0x10)."""
+    body_len = len(payload)
+    # Single-byte fields are endian-independent
+    hdr = _struct.pack(
+        "BBBB3sB",
+        0x04, packet_type, 0x00, 0x00,
+        bytes([0x10, 0x00, 0x00]),  # DREP = little-endian
+        0x00,
+    )
+    hdr += b"\x00" * 16  # object_uuid
+    hdr += b"\x00" * 16  # interface_uuid
+    hdr += b"\x00" * 16  # activity_uuid
+    # Multi-byte fields in little-endian
+    hdr += _struct.pack(
+        "<IIIHHHHHBB",
+        0,                  # server_boot_time
+        1,                  # interface_version
+        0,                  # sequence_number
+        operation_number,
+        0xFFFF,             # interface_hint
+        0xFFFF,             # activity_hint
+        body_len,           # length_of_body
+        0,                  # fragment_number
+        0,                  # auth_protocol
+        0,                  # serial_low
+    )
+    return hdr + payload
+
+
+class TestSendReceiveLittleEndian:
+    """Test _send_receive with little-endian (DREP=0x10) responses.
+
+    Regression: _replace() fails when __len__ returns byte-size instead
+    of field count, breaking the DREP correction path at rpc.py:1359.
+    """
+
+    @pytest.fixture
+    def mock_rpc(self):
+        """Create RPCCon with mocked sockets."""
+        blocks = {
+            PNDCPBlock.NAME_OF_STATION: b"test-device",
+            PNDCPBlock.IP_ADDRESS: bytes(
+                [192, 168, 1, 100, 255, 255, 255, 0, 192, 168, 1, 1]
+            ),
+            PNDCPBlock.DEVICE_ID: bytes([0x00, 0x2A, 0x00, 0x01]),
+        }
+        info = DCPDeviceDescription(b"\x00\x11\x22\x33\x44\x55", blocks)
+        with patch("profinet.rpc.socket"):
+            rpc = RPCCon(info, timeout=2.0)
+            yield rpc
+            rpc.close()
+
+    def test_little_endian_response_parsed(self, mock_rpc):
+        """A little-endian response triggers _replace(); verify it succeeds."""
+        from profinet.protocol import PNRPCHeader
+
+        le_response = _build_rpc_bytes_le(
+            packet_type=PNRPCHeader.RESPONSE,
+            operation_number=0x02,
+            payload=b"\x00" * 20,
+        )
+
+        mock_rpc._socket.recvfrom = MagicMock(
+            return_value=(le_response, ("192.168.1.100", 34964))
+        )
+        mock_rpc._socket.sendto = MagicMock()
+
+        rpc_req = PNRPCHeader(
+            0x04, PNRPCHeader.REQUEST, 0, 0,
+            b"\x00\x00\x00", 0,
+            b"\x00" * 16, b"\x00" * 16, b"\x00" * 16,
+            0, 1, 0, PNRPCHeader.READ, 0xFFFF, 0xFFFF, 0, 0, 0, 0,
+            payload=b"",
+        )
+
+        result = mock_rpc._send_receive(rpc_req)
+        assert result.packet_type == PNRPCHeader.RESPONSE
+        assert result.operation_number == 0x02
+        assert result.length_of_body == 20
+
+    def test_little_endian_fields_correctly_swapped(self, mock_rpc):
+        """Multi-byte fields are correctly byte-swapped for LE response."""
+        from profinet.protocol import PNRPCHeader
+
+        le_response = _build_rpc_bytes_le(
+            packet_type=PNRPCHeader.RESPONSE,
+            operation_number=0x03,
+            payload=b"\xAB" * 10,
+        )
+
+        mock_rpc._socket.recvfrom = MagicMock(
+            return_value=(le_response, ("192.168.1.100", 34964))
+        )
+        mock_rpc._socket.sendto = MagicMock()
+
+        rpc_req = PNRPCHeader(
+            0x04, PNRPCHeader.REQUEST, 0, 0,
+            b"\x00\x00\x00", 0,
+            b"\x00" * 16, b"\x00" * 16, b"\x00" * 16,
+            0, 1, 0, PNRPCHeader.WRITE, 0xFFFF, 0xFFFF, 0, 0, 0, 0,
+            payload=b"",
+        )
+
+        result = mock_rpc._send_receive(rpc_req)
+        assert result.operation_number == 0x03
+        assert result.length_of_body == 10
+
+
 class TestSendReceiveEchoSkip:
     """Test echo-skip logic in _send_receive."""
 

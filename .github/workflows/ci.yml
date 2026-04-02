@@ -65,16 +65,15 @@ jobs:
         run: ruff check profinet/
 
   # ── Format ───────────────────────────────────────────────────────
-  # Checks formatting on push/workflow_call; auto-formats on PRs.
   format:
     name: Format (ruff format)
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ github.head_ref || github.ref }}
+          persist-credentials: false
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
@@ -84,17 +83,8 @@ jobs:
         run: |
           pip install --only-binary :all: "ruff>=0.15.0"
 
-      - name: Run ruff format
-        run: ruff format profinet/
-
-      - name: Commit formatting changes
-        if: github.event_name == 'pull_request'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git diff --staged --quiet || git commit -m "style: auto-format with ruff"
-          git push
+      - name: Run ruff format --check
+        run: ruff format --check profinet/
 
   # ── Test ─────────────────────────────────────────────────────────
   test:

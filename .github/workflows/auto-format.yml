@@ -1,0 +1,53 @@
+# ============================================================================
+# Auto-format PR branches with ruff
+# ============================================================================
+#
+# Separated from CI to avoid granting contents:write to the reusable
+# CI workflow (which is also called by the release pipeline).
+#
+# Security notes:
+#   - persist-credentials: false prevents token leakage to later steps
+#   - Token is only used explicitly in the push step via remote URL
+#   - Only stages profinet/ files (not git add -A) to prevent unintended commits
+#   - Only runs on pull_request events
+#
+# ============================================================================
+
+name: Auto-format
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  format:
+    name: Auto-format (ruff)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install --only-binary :all: "ruff>=0.15.0"
+
+      - name: Run ruff format
+        run: ruff format profinet/
+
+      - name: Commit and push formatting changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          git add profinet/
+          git diff --staged --quiet || git commit -m "style: auto-format with ruff"
+          git push

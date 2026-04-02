@@ -308,3 +308,67 @@ class TestMakePacketNoPayload:
         """Test len() on no-payload packet returns header size only."""
         pkt = PNBlockHeader(0x0020, 0x003C, 0x01, 0x00)
         assert len(pkt) == 6  # HHBB = 2+2+1+1
+
+
+class TestMakePacketNamedtupleCompat:
+    """Test that make_packet classes remain compatible with namedtuple API.
+
+    Regression: __len__ returns byte-size, which broke _replace() and
+    _make() because they internally validate field count via len().
+    """
+
+    def test_replace_with_payload(self):
+        """_replace() works on a packet that has a payload field."""
+        from profinet.protocol import PNRPCHeader
+
+        data = struct.pack(
+            ">BB BB 3s B 16s 16s 16s III HHH HH BB",
+            0x04, 0x02, 0, 0, b"\x00\x00\x00", 0,
+            b"\x00" * 16, b"\x00" * 16, b"\x00" * 16,
+            0, 1, 0, 0x02, 0xFFFF, 0xFFFF, 0, 0, 0, 0,
+        )
+        pkt = PNRPCHeader(data)
+        replaced = pkt._replace(operation_number=0x05)
+        assert replaced.operation_number == 0x05
+        assert replaced.packet_type == pkt.packet_type
+
+    def test_replace_no_payload(self):
+        """_replace() works on a packet without a payload field."""
+        pkt = PNBlockHeader(0x0020, 0x003C, 0x01, 0x00)
+        replaced = pkt._replace(block_type=0x0021)
+        assert replaced.block_type == 0x0021
+        assert replaced.block_length == 0x003C
+
+    def test_make_with_payload(self):
+        """_make() works on a packet that has a payload field."""
+        from profinet.protocol import PNRPCHeader
+
+        data = struct.pack(
+            ">BB BB 3s B 16s 16s 16s III HHH HH BB",
+            0x04, 0x02, 0, 0, b"\x00\x00\x00", 0,
+            b"\x00" * 16, b"\x00" * 16, b"\x00" * 16,
+            0, 1, 0, 0x02, 0xFFFF, 0xFFFF, 0, 0, 0, 0,
+        )
+        pkt = PNRPCHeader(data)
+        pkt2 = PNRPCHeader._make(list(pkt))
+        assert pkt2.operation_number == pkt.operation_number
+        assert pkt2.payload == pkt.payload
+
+    def test_make_no_payload(self):
+        """_make() works on a packet without a payload field."""
+        pkt = PNBlockHeader(0x0020, 0x003C, 0x01, 0x00)
+        pkt2 = PNBlockHeader._make(list(pkt))
+        assert pkt2 == pkt
+
+    def test_len_still_returns_byte_size(self):
+        """len() must still return byte size for backward compat."""
+        from profinet.protocol import PNRPCHeader
+
+        data = struct.pack(
+            ">BB BB 3s B 16s 16s 16s III HHH HH BB",
+            0x04, 0x02, 0, 0, b"\x00\x00\x00", 0,
+            b"\x00" * 16, b"\x00" * 16, b"\x00" * 16,
+            0, 1, 0, 0x02, 0xFFFF, 0xFFFF, 0, 0, 0, 0,
+        )
+        pkt = PNRPCHeader(data)
+        assert len(pkt) == 80

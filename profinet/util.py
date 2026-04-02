@@ -1095,6 +1095,19 @@ def make_packet(
                 total += len(self.payload)
             return total
 
+        @classmethod
+        def _make(cls, iterable):
+            """Override namedtuple._make to use tuple.__len__ for field-count
+            validation, avoiding interference from our __len__ byte-size override."""
+            result = tuple.__new__(cls, iterable)
+            actual = tuple.__len__(result)
+            expected = len(field_names)
+            if actual != expected:
+                raise TypeError(
+                    f"Expected {expected} arguments, got {actual}"
+                )
+            return result
+
     # Set class attributes
     PacketClass.fmt = fmt
     PacketClass.fmt_size = size

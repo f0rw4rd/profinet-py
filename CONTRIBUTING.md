@@ -21,6 +21,13 @@ both licenses — see the [CLA](#contributor-license-agreement) below.
 - Python 3.10+
 - Ruff linting and formatting: `ruff check` and `ruff format`
 
+## AI-assisted contributions
+
+AI-assisted contributions (e.g. code written with Copilot, Claude, ChatGPT) are
+welcome. However, AI co-author lines (`Co-Authored-By`) are not permitted in
+commit messages — a pre-commit hook enforces this. You are the author of your
+contribution; the tooling you used does not need attribution in the git history.
+
 ---
 
 ## Contributor License Agreement

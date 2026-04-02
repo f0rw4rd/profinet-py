@@ -1103,9 +1103,7 @@ def make_packet(
             actual = tuple.__len__(result)
             expected = len(field_names)
             if actual != expected:
-                raise TypeError(
-                    f"Expected {expected} arguments, got {actual}"
-                )
+                raise TypeError(f"Expected {expected} arguments, got {actual}")
             return result
 
     # Set class attributes

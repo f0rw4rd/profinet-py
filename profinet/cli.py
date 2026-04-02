@@ -156,7 +156,9 @@ def cmd_write(args: argparse.Namespace) -> int:
             data = bytes.fromhex(args.data.replace(" ", ""))
             conn.write(api=args.api, slot=args.slot, subslot=args.subslot, idx=idx, data=data)
 
-            print(f"Wrote {len(data)} bytes to slot={args.slot} subslot={args.subslot} index=0x{idx:04X}")
+            print(
+                f"Wrote {len(data)} bytes to slot={args.slot} subslot={args.subslot} index=0x{idx:04X}"
+            )
 
         return 0
     finally:
@@ -659,7 +661,9 @@ def create_parser() -> argparse.ArgumentParser:
     sub.add_argument("--api", type=int, default=0, help="API (default: 0)")
     sub.add_argument("--slot", type=int, required=True, help="Slot number")
     sub.add_argument("--subslot", type=int, required=True, help="Subslot number")
-    sub.add_argument("--index", required=True, help="Record index (hex with 0x prefix, e.g. 0xAFF1)")
+    sub.add_argument(
+        "--index", required=True, help="Record index (hex with 0x prefix, e.g. 0xAFF1)"
+    )
     sub.add_argument("data", metavar="HEX", help="Data to write as hex string (e.g. deadbeef)")
     sub.set_defaults(func=cmd_write)
 

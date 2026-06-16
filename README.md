@@ -122,3 +122,7 @@ see [LICENSE-COMMERCIAL.md](LICENSE-COMMERCIAL.md) for details.
 - [PROFINET Specification](https://www.profibus.com/technology/profinet)
 - [Wireshark PROFINET/IO](https://wiki.wireshark.org/PROFINET/IO)
 - [construct library](https://construct.readthedocs.io/)
+
+## Trademarks
+
+All marks belong to their owners; used nominatively to describe interoperability; no endorsement implied.

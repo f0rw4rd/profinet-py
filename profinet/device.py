@@ -1071,86 +1071,106 @@ class ProfinetDevice:
         self,
         iocr_setup: Any,
         max_consecutive_timeouts: int = 3,
+        *,
+        start_rt_before_prm_end: bool = True,
+        confirm_application_ready: bool = True,
+        start_alarm_listener: bool = True,
     ) -> Any:
         """Start cyclic IO exchange with device.
 
-        Handles the full cyclic IO lifecycle:
-        1. Connect with IOCARSingle + IOCR + AlarmCR
-        2. PrmEnd (end parameter phase)
-        3. ApplicationReady (wait for device CControl)
-        4. Build IOCRConfigs from IOCRSetup
-        5. Create and start CyclicController
+        Handles the cyclic IO lifecycle:
+        1. Open a fresh IOCARSingle + IOCR + AlarmCR AR.
+        2. Build IOCRConfigs from the assigned frame IDs.
+        3. Optionally start RT output before PrmEnd.
+        4. Send PrmEnd.
+        5. Optionally wait for and confirm device ApplicationReady.
+        6. Ensure the CyclicController is running.
 
-        Args:
-            iocr_setup: IOCRSetup with slots, timing, etc.
-            max_consecutive_timeouts: Watchdog timeouts before FAULT
-                (0 = never enter FAULT)
-
-        Returns:
-            CyclicController instance (already started)
-
-        Raises:
-            RPCConnectionError: If connection fails
-            RPCError: If PrmEnd or ApplicationReady fails
-            RuntimeError: If cyclic IO not established
-
-        Example:
-            >>> from profinet import IOCRSetup, IOSlot
-            >>> setup = IOCRSetup(slots=[
-            ...     IOSlot(slot=1, subslot=1, input_length=4, output_length=4,
-            ...            module_ident=0x01, submodule_ident=0x01),
-            ... ])
-            >>> with ProfinetDevice.discover("dev", "eth0") as device:
-            ...     cyclic = device.start_cyclic(setup)
-            ...     cyclic.set_output_data(1, 1, b'\\x01\\x02\\x03\\x04')
-            ...     data = cyclic.get_input_data(1, 1)
-            ...     cyclic.stop()
+        Starting RT before PrmEnd is the default because some real IO devices
+        start their input provider only after they see valid controller output
+        frames. ``confirm_application_ready`` remains enabled by default for
+        standard lifecycle compliance, but can be disabled for devices where
+        the current CControl exchange is known to break RT traffic.
         """
         from .cyclic import CyclicController
         from .rt import build_iocr_configs
 
-        # 1. Connect with IOCR
-        rpc = self._ensure_connected()
-        result = rpc.connect(
-            src_mac=self._src_mac,
-            with_alarm_cr=True,
-            iocr_setup=iocr_setup,
-        )
-        if not result or not result.has_cyclic:
-            raise RuntimeError("Cyclic IO not established by device")
+        # Cyclic IO needs an IO AR. If a DeviceAccess AR is already open for
+        # acyclic records, close it first instead of reconnecting in-place; some
+        # devices reject an IOCARSingle negotiated over the existing RPC object.
+        if self._rpc is not None:
+            try:
+                if self._connected:
+                    self._rpc.disconnect()
+            finally:
+                self._rpc.close()
+                self._rpc = None
+                self._connected = False
 
-        # 2. PrmEnd
-        rpc.prm_end()
+        rpc = RPCCon(self._info, timeout=self._timeout)
+        cyclic = None
+        try:
+            result = rpc.connect(
+                src_mac=self._src_mac,
+                with_alarm_cr=True,
+                iocr_setup=iocr_setup,
+            )
+            if not result or not result.has_cyclic:
+                raise RuntimeError("Cyclic IO not established by device")
 
-        # 3. ApplicationReady
-        rpc.application_ready(timeout=30.0)
+            dst_mac = self._info.mac
+            if isinstance(dst_mac, str):
+                dst_mac = bytes.fromhex(dst_mac.replace(":", ""))
 
-        # 4. Build IOCRConfigs (uses shared helper for proper IOCS handling)
-        dst_mac = self._info.mac
-        if isinstance(dst_mac, str):
-            dst_mac = bytes.fromhex(dst_mac.replace(":", ""))
+            input_iocr, output_iocr = build_iocr_configs(
+                slots=iocr_setup.slots,
+                input_frame_id=result.input_frame_id,
+                output_frame_id=result.output_frame_id,
+                send_clock_factor=iocr_setup.send_clock_factor,
+                reduction_ratio=iocr_setup.reduction_ratio,
+                watchdog_factor=iocr_setup.watchdog_factor,
+            )
 
-        input_iocr, output_iocr = build_iocr_configs(
-            slots=iocr_setup.slots,
-            input_frame_id=result.input_frame_id,
-            output_frame_id=result.output_frame_id,
-            send_clock_factor=iocr_setup.send_clock_factor,
-            reduction_ratio=iocr_setup.reduction_ratio,
-            watchdog_factor=iocr_setup.watchdog_factor,
-        )
+            cyclic = CyclicController(
+                interface=self._interface,
+                src_mac=self._src_mac,
+                dst_mac=dst_mac,
+                input_iocr=input_iocr,
+                output_iocr=output_iocr,
+                max_consecutive_timeouts=max_consecutive_timeouts,
+            )
 
-        # 5. Create and start CyclicController
-        cyclic = CyclicController(
-            interface=self._interface,
-            src_mac=self._src_mac,
-            dst_mac=dst_mac,
-            input_iocr=input_iocr,
-            output_iocr=output_iocr,
-            max_consecutive_timeouts=max_consecutive_timeouts,
-        )
-        cyclic.start()
+            self._rpc = rpc
+            self._connected = True
 
-        return cyclic
+            if start_alarm_listener:
+                self.start_alarm_listener()
+
+            if start_rt_before_prm_end:
+                cyclic.start()
+
+            rpc.prm_end()
+
+            if confirm_application_ready:
+                rpc.application_ready(timeout=30.0)
+
+            if not start_rt_before_prm_end:
+                cyclic.start()
+
+            return cyclic
+        except Exception:
+            if cyclic is not None:
+                cyclic.stop()
+            self.stop_alarm_listener()
+            try:
+                rpc.disconnect()
+            except Exception:
+                pass
+            rpc.close()
+            if self._rpc is rpc:
+                self._rpc = None
+                self._connected = False
+            raise
 
     # =========================================================================
     # Utility Methods

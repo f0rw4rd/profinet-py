@@ -1091,6 +1091,44 @@ class ProfinetDevice:
         frames. ``confirm_application_ready`` remains enabled by default for
         standard lifecycle compliance, but can be disabled for devices where
         the current CControl exchange is known to break RT traffic.
+
+        Args:
+            iocr_setup: IOCRSetup with slots, timing, etc.
+            max_consecutive_timeouts: Watchdog timeouts before FAULT
+                (0 = monitoring-only, never enters FAULT and keeps IOCS GOOD)
+            start_rt_before_prm_end: Start RT output frames after Connect but
+                before PrmEnd (default True, matches typical controller
+                startup). Set False to restore the old post-ApplicationReady
+                RT start.
+            confirm_application_ready: Wait for and answer the device's
+                ApplicationReady CControl (default True). Warning: disabling
+                this leaves the device's CControl request unanswered;
+                conformant devices will retry and may abort the AR. Use only
+                for devices where the CControl exchange is known to break RT
+                traffic.
+            start_alarm_listener: Start the background alarm listener thread
+                (default True). The AR always negotiates an AlarmCR, so
+                without a listener device alarms go unacknowledged.
+
+        Returns:
+            CyclicController instance (already started)
+
+        Raises:
+            RPCConnectionError: If connection fails
+            RPCError: If PrmEnd or ApplicationReady fails
+            RuntimeError: If cyclic IO not established
+
+        Example:
+            >>> from profinet import IOCRSetup, IOSlot
+            >>> setup = IOCRSetup(slots=[
+            ...     IOSlot(slot=1, subslot=1, input_length=4, output_length=4,
+            ...            module_ident=0x01, submodule_ident=0x01),
+            ... ])
+            >>> with ProfinetDevice.discover("dev", "eth0") as device:
+            ...     cyclic = device.start_cyclic(setup)
+            ...     cyclic.set_output_data(1, 1, b'\\x01\\x02\\x03\\x04')
+            ...     data = cyclic.get_input_data(1, 1)
+            ...     cyclic.stop()
         """
         from .cyclic import CyclicController
         from .rt import build_iocr_configs
@@ -1099,6 +1137,8 @@ class ProfinetDevice:
         # acyclic records, close it first instead of reconnecting in-place; some
         # devices reject an IOCARSingle negotiated over the existing RPC object.
         if self._rpc is not None:
+            # An alarm listener bound to the old AR must not outlive it.
+            self.stop_alarm_listener()
             try:
                 if self._connected:
                     self._rpc.disconnect()
@@ -1164,8 +1204,8 @@ class ProfinetDevice:
             self.stop_alarm_listener()
             try:
                 rpc.disconnect()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"AR release failed during start_cyclic rollback: {e}")
             rpc.close()
             if self._rpc is rpc:
                 self._rpc = None

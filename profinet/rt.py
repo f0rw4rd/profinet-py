@@ -49,8 +49,10 @@ EtherTypeStruct = cs.Struct(
 )
 
 # Frame ID ranges
-FRAME_ID_RT_CLASS_1_MIN = 0x8000
-FRAME_ID_RT_CLASS_1_MAX = 0xFBFF
+# RTC1 (legacy RT_CLASS_1) cyclic frame ID range per IEC 61158-6-10;
+# 0x8000-0xBFFF is a separate range (RT_CLASS_2 in pre-V2.3 spec naming)
+FRAME_ID_RT_CLASS_1_MIN = 0xC000
+FRAME_ID_RT_CLASS_1_MAX = 0xF7FF
 FRAME_ID_ALARM_HIGH = 0xFC01
 FRAME_ID_ALARM_LOW = 0xFE01
 

@@ -1014,7 +1014,10 @@ def _build_rpc_bytes_le(packet_type=0x02, operation_number=0x02, payload=b""):
     # Single-byte fields are endian-independent
     hdr = _struct.pack(
         "BBBB3sB",
-        0x04, packet_type, 0x00, 0x00,
+        0x04,
+        packet_type,
+        0x00,
+        0x00,
         bytes([0x10, 0x00, 0x00]),  # DREP = little-endian
         0x00,
     )
@@ -1024,16 +1027,16 @@ def _build_rpc_bytes_le(packet_type=0x02, operation_number=0x02, payload=b""):
     # Multi-byte fields in little-endian
     hdr += _struct.pack(
         "<IIIHHHHHBB",
-        0,                  # server_boot_time
-        1,                  # interface_version
-        0,                  # sequence_number
+        0,  # server_boot_time
+        1,  # interface_version
+        0,  # sequence_number
         operation_number,
-        0xFFFF,             # interface_hint
-        0xFFFF,             # activity_hint
-        body_len,           # length_of_body
-        0,                  # fragment_number
-        0,                  # auth_protocol
-        0,                  # serial_low
+        0xFFFF,  # interface_hint
+        0xFFFF,  # activity_hint
+        body_len,  # length_of_body
+        0,  # fragment_number
+        0,  # auth_protocol
+        0,  # serial_low
     )
     return hdr + payload
 
@@ -1050,9 +1053,7 @@ class TestSendReceiveLittleEndian:
         """Create RPCCon with mocked sockets."""
         blocks = {
             PNDCPBlock.NAME_OF_STATION: b"test-device",
-            PNDCPBlock.IP_ADDRESS: bytes(
-                [192, 168, 1, 100, 255, 255, 255, 0, 192, 168, 1, 1]
-            ),
+            PNDCPBlock.IP_ADDRESS: bytes([192, 168, 1, 100, 255, 255, 255, 0, 192, 168, 1, 1]),
             PNDCPBlock.DEVICE_ID: bytes([0x00, 0x2A, 0x00, 0x01]),
         }
         info = DCPDeviceDescription(b"\x00\x11\x22\x33\x44\x55", blocks)
@@ -1071,16 +1072,29 @@ class TestSendReceiveLittleEndian:
             payload=b"\x00" * 20,
         )
 
-        mock_rpc._socket.recvfrom = MagicMock(
-            return_value=(le_response, ("192.168.1.100", 34964))
-        )
+        mock_rpc._socket.recvfrom = MagicMock(return_value=(le_response, ("192.168.1.100", 34964)))
         mock_rpc._socket.sendto = MagicMock()
 
         rpc_req = PNRPCHeader(
-            0x04, PNRPCHeader.REQUEST, 0, 0,
-            b"\x00\x00\x00", 0,
-            b"\x00" * 16, b"\x00" * 16, b"\x00" * 16,
-            0, 1, 0, PNRPCHeader.READ, 0xFFFF, 0xFFFF, 0, 0, 0, 0,
+            0x04,
+            PNRPCHeader.REQUEST,
+            0,
+            0,
+            b"\x00\x00\x00",
+            0,
+            b"\x00" * 16,
+            b"\x00" * 16,
+            b"\x00" * 16,
+            0,
+            1,
+            0,
+            PNRPCHeader.READ,
+            0xFFFF,
+            0xFFFF,
+            0,
+            0,
+            0,
+            0,
             payload=b"",
         )
 
@@ -1096,19 +1110,32 @@ class TestSendReceiveLittleEndian:
         le_response = _build_rpc_bytes_le(
             packet_type=PNRPCHeader.RESPONSE,
             operation_number=0x03,
-            payload=b"\xAB" * 10,
+            payload=b"\xab" * 10,
         )
 
-        mock_rpc._socket.recvfrom = MagicMock(
-            return_value=(le_response, ("192.168.1.100", 34964))
-        )
+        mock_rpc._socket.recvfrom = MagicMock(return_value=(le_response, ("192.168.1.100", 34964)))
         mock_rpc._socket.sendto = MagicMock()
 
         rpc_req = PNRPCHeader(
-            0x04, PNRPCHeader.REQUEST, 0, 0,
-            b"\x00\x00\x00", 0,
-            b"\x00" * 16, b"\x00" * 16, b"\x00" * 16,
-            0, 1, 0, PNRPCHeader.WRITE, 0xFFFF, 0xFFFF, 0, 0, 0, 0,
+            0x04,
+            PNRPCHeader.REQUEST,
+            0,
+            0,
+            b"\x00\x00\x00",
+            0,
+            b"\x00" * 16,
+            b"\x00" * 16,
+            b"\x00" * 16,
+            0,
+            1,
+            0,
+            PNRPCHeader.WRITE,
+            0xFFFF,
+            0xFFFF,
+            0,
+            0,
+            0,
+            0,
             payload=b"",
         )
 

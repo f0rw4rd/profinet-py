@@ -442,7 +442,7 @@ def main():
         logger.info(f"First input data received at +{received_data[0][0] - start_time:.3f}s")
         logger.info(f"Total unique input updates: {len(received_data)}")
         # Show last few
-        for ts, slot, subslot, data in received_data[-5:]:
+        for _ts, slot, subslot, data in received_data[-5:]:
             logger.info(f"  slot={slot}/0x{subslot:04X}: {hex_dump(data)}")
     else:
         logger.warning("No input data received!")

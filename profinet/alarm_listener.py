@@ -23,7 +23,7 @@ import construct as cs
 
 from .alarms import AlarmNotification, parse_alarm_notification
 from .protocol import PNAlarmAckPDU, PNBlockHeader, PNRTAHeader
-from .util import ethernet_socket
+from .util import ethernet_socket, skip_vlan_tags
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,16 @@ ETHERTYPE_PROFINET = 0x8892
 # Pre-built constant bytes for frame construction
 _FRAME_ID_ALARM_LOW_BYTES = cs.Int16ub.build(FRAME_ID_ALARM_LOW)
 _ETHERTYPE_PROFINET_BYTES = cs.Int16ub.build(ETHERTYPE_PROFINET)
+
+# RTA AddFlags bits: window size in bits 0-3, TACK (transport ack request)
+# in bit 4 (IEC 61158-6-10; cf. p-net pf_put_alarm_fixed)
+ADD_FLAGS_WINDOW_1 = 0x01
+ADD_FLAGS_TACK = 0x10
+
+# RTA sequence numbers start at 0xFFFF and wrap modulo 0x8000 after ack
+SEQ_NUM_INIT = 0xFFFF
+SEQ_NUM_INIT_O = 0xFFFE
+SEQ_NUM_MASK = 0x7FFF
 
 
 @dataclass
@@ -110,9 +120,12 @@ class AlarmListener:
         self._callbacks: List[Callable[[AlarmNotification], None]] = []
         self._sock: Optional[socket.socket] = None
 
-        # Sequence tracking for RTA
-        self._send_seq_num: int = 0
-        self._recv_seq_num: int = 0
+        # RTA sequence counters (APMS send side / APMR receive side).
+        # *_o holds the last acknowledged/accepted value.
+        self._send_seq_num: int = SEQ_NUM_INIT
+        self._send_seq_num_o: int = SEQ_NUM_INIT_O
+        self._exp_seq_num: int = SEQ_NUM_INIT
+        self._exp_seq_num_o: int = SEQ_NUM_INIT_O
 
     def add_callback(self, callback: Callable[[AlarmNotification], None]) -> None:
         """Register callback for received alarms.
@@ -201,9 +214,11 @@ class AlarmListener:
             PermissionError: If raw socket requires elevated privileges
         """
         if self.endpoint.transport == 0:
-            # Layer 2 raw socket via platform-abstracted ethernet_socket()
+            # Layer 2 raw socket via platform-abstracted ethernet_socket().
+            # Bind ETH_P_ALL (ethertype=None): a socket bound to 0x8892 never
+            # sees VLAN-tagged alarm frames unless the NIC strips the tag.
             try:
-                sock = ethernet_socket(self.endpoint.interface, ETHERTYPE_PROFINET)
+                sock = ethernet_socket(self.endpoint.interface, None)
             except PermissionError as e:
                 raise PermissionError(f"Raw socket requires root/admin privileges: {e}") from e
         else:
@@ -245,20 +260,25 @@ class AlarmListener:
         if len(data) < 16:
             return
 
-        # Parse Ethernet header (14 bytes) + Frame ID (2 bytes)
-        eth_hdr = EthernetAlarmHeaderStruct.parse(data[:16])
+        # Parse Ethernet header, skipping any 802.1Q priority tags
+        src_mac = data[6:12]
+        eth_offset = skip_vlan_tags(data)
+        if len(data) < eth_offset + 4:
+            return
+        ethertype = int.from_bytes(data[eth_offset : eth_offset + 2], "big")
 
-        if eth_hdr.ethertype != ETHERTYPE_PROFINET:
+        if ethertype != ETHERTYPE_PROFINET:
             return
 
         # Check source MAC matches device
-        if eth_hdr.src_mac != self.endpoint.device_mac:
+        if src_mac != self.endpoint.device_mac:
             return
 
-        if eth_hdr.frame_id == FRAME_ID_ALARM_HIGH:
-            self._process_alarm(data[16:], high_priority=True, src_mac=eth_hdr.src_mac)
-        elif eth_hdr.frame_id == FRAME_ID_ALARM_LOW:
-            self._process_alarm(data[16:], high_priority=False, src_mac=eth_hdr.src_mac)
+        frame_id = int.from_bytes(data[eth_offset + 2 : eth_offset + 4], "big")
+        if frame_id == FRAME_ID_ALARM_HIGH:
+            self._process_alarm(data[eth_offset + 4 :], high_priority=True, src_mac=src_mac)
+        elif frame_id == FRAME_ID_ALARM_LOW:
+            self._process_alarm(data[eth_offset + 4 :], high_priority=False, src_mac=src_mac)
 
     def _handle_udp_frame(self) -> None:
         """Process UDP datagram."""
@@ -301,7 +321,56 @@ class AlarmListener:
                     )
                     return
 
-                self._recv_seq_num = rta_header.send_seq_num
+                # pdu_type byte: version in high nibble, type in low nibble
+                version = (rta_header.pdu_type >> 4) & 0x0F
+                pdu_type = rta_header.pdu_type & 0x0F
+                if version != PNRTAHeader.VERSION_1:
+                    logger.debug(f"Ignoring RTA PDU with version {version}")
+                    return
+
+                if pdu_type == PNRTAHeader.RTA_TYPE_ACK:
+                    self._handle_transport_ack(rta_header)
+                    return
+                if pdu_type == PNRTAHeader.RTA_TYPE_NACK:
+                    logger.warning(
+                        f"RTA NACK from device (ack_seq={rta_header.ack_seq_num}), "
+                        f"sequence error on our side"
+                    )
+                    return
+                if pdu_type == PNRTAHeader.RTA_TYPE_ERR:
+                    status = int.from_bytes(alarm_data[:4], "big") if len(alarm_data) >= 4 else 0
+                    logger.error(f"RTA ERROR PDU from device, PNIOStatus=0x{status:08X}")
+                    return
+                if pdu_type != PNRTAHeader.RTA_TYPE_DATA:
+                    logger.debug(f"Ignoring RTA PDU type {pdu_type}")
+                    return
+
+                # DATA PDU: transport-acknowledge handshake (APMR side).
+                if not (rta_header.add_flags & ADD_FLAGS_TACK):
+                    return
+                if rta_header.send_seq_num == self._exp_seq_num_o:
+                    # Retransmission of an already-accepted PDU: re-ack only
+                    self._send_transport_ack(src_mac, bool(high_priority))
+                    return
+                if rta_header.send_seq_num != self._exp_seq_num:
+                    logger.warning(
+                        f"RTA sequence error (got {rta_header.send_seq_num}, "
+                        f"expected {self._exp_seq_num}), sending NACK"
+                    )
+                    self._send_nack(src_mac, bool(high_priority))
+                    return
+
+                # In sequence: advance receive counters
+                self._exp_seq_num_o = self._exp_seq_num
+                self._exp_seq_num = (self._exp_seq_num + 1) & SEQ_NUM_MASK
+
+                # A DATA PDU may piggyback the ack for our last DATA
+                if rta_header.ack_seq_num == self._send_seq_num:
+                    self._send_seq_num_o = self._send_seq_num
+                    self._send_seq_num = (self._send_seq_num + 1) & SEQ_NUM_MASK
+
+                # The device retransmits and then aborts the AR without this
+                self._send_transport_ack(src_mac, bool(high_priority))
             else:
                 alarm_data = payload
                 rta_header = None
@@ -309,17 +378,12 @@ class AlarmListener:
             # Parse alarm notification
             alarm = parse_alarm_notification(alarm_data)
 
-            # Set priority from frame ID if not from block type
-            if high_priority is not None:
-                # Verify consistency or trust frame ID
-                pass
-
             logger.debug(
                 f"Received alarm: {alarm.alarm_type_name} "
                 f"at {alarm.location} (seq={alarm.alarm_sequence_number})"
             )
 
-            # Send acknowledgment
+            # Send application-level AlarmAck
             self._send_ack(alarm, src_mac, src_addr)
 
             # Invoke callbacks
@@ -333,6 +397,78 @@ class AlarmListener:
             logger.warning(f"Failed to parse alarm: {e}")
         except Exception as e:
             logger.error(f"Alarm processing error: {e}", exc_info=True)
+
+    def _handle_transport_ack(self, rta_header) -> None:
+        """Handle a pure RTA-ACK PDU confirming our last DATA PDU."""
+        if rta_header.ack_seq_num == self._send_seq_num:
+            self._send_seq_num_o = self._send_seq_num
+            self._send_seq_num = (self._send_seq_num + 1) & SEQ_NUM_MASK
+            logger.debug(f"RTA transport ack received (seq={rta_header.ack_seq_num})")
+        else:
+            logger.debug(
+                f"Stale RTA ack (ack_seq={rta_header.ack_seq_num}, expected {self._send_seq_num})"
+            )
+
+    def _send_rta_frame(
+        self,
+        pdu_type: int,
+        add_flags: int,
+        send_seq_num: int,
+        ack_seq_num: int,
+        var_part: bytes,
+        dst_mac: bytes,
+        high_priority: bool,
+    ) -> None:
+        """Build and send an RTA PDU (Layer 2)."""
+        rta_header = PNRTAHeader(
+            alarm_dst_endpoint=self.endpoint.device_ref,
+            alarm_src_endpoint=self.endpoint.controller_ref,
+            pdu_type=(PNRTAHeader.VERSION_1 << 4) | pdu_type,
+            add_flags=add_flags,
+            send_seq_num=send_seq_num,
+            ack_seq_num=ack_seq_num,
+            var_part_len=len(var_part),
+            payload=b"",
+        )
+        frame_id_bytes = (
+            cs.Int16ub.build(FRAME_ID_ALARM_HIGH) if high_priority else _FRAME_ID_ALARM_LOW_BYTES
+        )
+        eth_frame = (
+            dst_mac
+            + self.controller_mac
+            + _ETHERTYPE_PROFINET_BYTES
+            + frame_id_bytes
+            + bytes(rta_header)
+            + var_part
+        )
+        try:
+            self._sock.send(eth_frame)
+        except Exception as e:
+            logger.error(f"Layer 2 send error: {e}")
+
+    def _send_transport_ack(self, dst_mac: bytes, high_priority: bool) -> None:
+        """Send a pure RTA-ACK (TACK) with empty var part."""
+        self._send_rta_frame(
+            PNRTAHeader.RTA_TYPE_ACK,
+            ADD_FLAGS_WINDOW_1,
+            self._send_seq_num_o,
+            self._exp_seq_num_o,
+            b"",
+            dst_mac,
+            high_priority,
+        )
+
+    def _send_nack(self, dst_mac: bytes, high_priority: bool) -> None:
+        """Send an RTA-NACK for an out-of-sequence DATA PDU."""
+        self._send_rta_frame(
+            PNRTAHeader.RTA_TYPE_NACK,
+            ADD_FLAGS_WINDOW_1,
+            self._send_seq_num_o,
+            self._exp_seq_num_o,
+            b"",
+            dst_mac,
+            high_priority,
+        )
 
     def _parse_rta_header(self, data: bytes) -> PNRTAHeader:
         """Parse RTA-PDU header."""
@@ -363,13 +499,14 @@ class AlarmListener:
                 0x00,  # version low
             )
 
-            # Reconstruct alarm specifier
+            # Reconstruct alarm specifier (ARDiagnosisState is bit 15; bit 14
+            # is reserved)
             alarm_specifier = (
                 (alarm.alarm_sequence_number & 0x07FF)
                 | (0x0800 if alarm.channel_diagnosis else 0)
                 | (0x1000 if alarm.manufacturer_specific else 0)
                 | (0x2000 if alarm.submodule_diagnosis_state else 0)
-                | (0x4000 if alarm.ar_diagnosis_state else 0)
+                | (0x8000 if alarm.ar_diagnosis_state else 0)
             )
 
             ack = PNAlarmAckPDU(
@@ -400,44 +537,25 @@ class AlarmListener:
     def _send_layer2_ack(
         self, ack_data: bytes, dst_mac: bytes, high_priority: bool = False
     ) -> None:
-        """Send acknowledgment via Layer 2.
+        """Send the AlarmAck as a DATA PDU with the TACK flag set.
+
+        Uses the current send sequence number; the counter advances only
+        when the device acknowledges (pure ACK or piggybacked in DATA).
 
         Args:
             ack_data: Serialized AlarmAck PDU
             dst_mac: Destination MAC address
             high_priority: True for high-priority alarm ack frame ID
         """
-        # Build RTA header
-        self._send_seq_num = (self._send_seq_num + 1) & 0xFFFF
-
-        rta_header = PNRTAHeader(
-            alarm_dst_endpoint=self.endpoint.device_ref,
-            alarm_src_endpoint=self.endpoint.controller_ref,
-            pdu_type=(PNRTAHeader.RTA_TYPE_DATA << 4) | PNRTAHeader.VERSION_1,
-            add_flags=0,
-            send_seq_num=self._send_seq_num,
-            ack_seq_num=self._recv_seq_num,
-            var_part_len=len(ack_data),
-            payload=b"",
+        self._send_rta_frame(
+            PNRTAHeader.RTA_TYPE_DATA,
+            ADD_FLAGS_WINDOW_1 | ADD_FLAGS_TACK,
+            self._send_seq_num,
+            self._exp_seq_num_o,
+            ack_data,
+            dst_mac,
+            high_priority,
         )
-
-        # Build complete frame with priority-matching frame ID
-        frame_id_bytes = (
-            cs.Int16ub.build(FRAME_ID_ALARM_HIGH) if high_priority else _FRAME_ID_ALARM_LOW_BYTES
-        )
-        eth_frame = (
-            dst_mac
-            + self.controller_mac
-            + _ETHERTYPE_PROFINET_BYTES
-            + frame_id_bytes
-            + bytes(rta_header)
-            + ack_data
-        )
-
-        try:
-            self._sock.send(eth_frame)
-        except Exception as e:
-            logger.error(f"Layer 2 send error: {e}")
 
     def _send_udp_ack(self, ack_data: bytes, dst_addr: tuple) -> None:
         """Send acknowledgment via UDP.

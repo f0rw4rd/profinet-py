@@ -562,7 +562,7 @@ def parse_alarm_notification(data: bytes) -> AlarmNotification:
     channel_diag = bool(alarm_specifier & 0x0800)  # Bit 11
     mfr_specific = bool(alarm_specifier & 0x1000)  # Bit 12
     submod_diag = bool(alarm_specifier & 0x2000)  # Bit 13
-    ar_diag = bool(alarm_specifier & 0x4000)  # Bit 14
+    ar_diag = bool(alarm_specifier & 0x8000)  # Bit 15 (bit 14 is reserved)
 
     notification = AlarmNotification(
         block_type=block_type,

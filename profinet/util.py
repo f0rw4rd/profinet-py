@@ -51,6 +51,30 @@ def to_hex(data: bytes) -> str:
     return ":".join(f"{c:02x}" for c in data)
 
 
+#: 802.1Q/802.1ad TPIDs that may precede the real EtherType
+VLAN_TPIDS = (b"\x81\x00", b"\x88\xa8", b"\x91\x00")
+
+
+def skip_vlan_tags(frame: bytes) -> int:
+    """Return the byte offset of the real EtherType in an Ethernet frame.
+
+    PROFINET devices commonly send RT and alarm frames 802.1Q
+    priority-tagged (TPID 0x8100, VID 0). Depending on NIC/driver VLAN
+    offload the tag may or may not be stripped before reaching a raw
+    socket, so receivers must skip any number of VLAN tags.
+
+    Args:
+        frame: Raw Ethernet frame starting at the destination MAC
+
+    Returns:
+        Offset of the EtherType (12 for untagged, +4 per VLAN tag)
+    """
+    offset = 12
+    while len(frame) >= offset + 4 and frame[offset : offset + 2] in VLAN_TPIDS:
+        offset += 4
+    return offset
+
+
 def s2mac(mac_str: str) -> bytes:
     """Convert MAC address string to bytes.
 

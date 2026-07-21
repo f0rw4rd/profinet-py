@@ -67,6 +67,7 @@ from .rt import (
     RTFrame,
 )
 from .util import ethernet_socket as _ethernet_socket
+from .util import skip_vlan_tags
 
 logger = logging.getLogger(__name__)
 
@@ -447,9 +448,11 @@ class CyclicController:
         self.stats.reset()
         self._last_rx_cycle_counter = None
 
-        # Create separate TX and RX sockets
+        # Create separate TX and RX sockets. The RX socket binds ETH_P_ALL:
+        # a socket bound to 0x8892 never sees VLAN-tagged frames unless the
+        # NIC strips the tag, and devices commonly send priority-tagged RT.
         self._tx_sock = self._create_raw_socket(timeout=None)
-        self._rx_sock = self._create_raw_socket(timeout=0.001)
+        self._rx_sock = self._create_raw_socket(timeout=0.001, ethertype=None)
 
         # Swap initial data into send buffer
         self._output_builder.swap()
@@ -543,11 +546,15 @@ class CyclicController:
     # Socket creation
     # =========================================================================
 
-    def _create_raw_socket(self, timeout: Optional[float] = None):
+    def _create_raw_socket(
+        self, timeout: Optional[float] = None, ethertype: Optional[int] = ETHERTYPE_PROFINET
+    ):
         """Create raw Ethernet socket.
 
         Args:
             timeout: Socket timeout (None for blocking, float for timeout)
+            ethertype: Bind protocol; None binds ETH_P_ALL so VLAN-tagged
+                frames are delivered too
 
         Returns:
             Configured socket
@@ -556,7 +563,7 @@ class CyclicController:
             PermissionError: If raw socket requires root/admin privileges
         """
         try:
-            sock = _ethernet_socket(self.interface, ETHERTYPE_PROFINET)
+            sock = _ethernet_socket(self.interface, ethertype)
         except PermissionError as e:
             raise PermissionError(f"Raw socket requires root/admin privileges: {e}") from e
 
@@ -567,6 +574,18 @@ class CyclicController:
     # =========================================================================
     # TX path
     # =========================================================================
+
+    def _tx_cycle(self) -> None:
+        """Swap the output buffer and transmit one frame.
+
+        Runs every cycle, including in FAULT: if the controller stops
+        sending, the device's Data Hold Timer expires and it aborts the
+        whole AR, so input frames can never resume and FAULT recovery
+        becomes unreachable. IOCS is already BAD in FAULT.
+        """
+        self._output_builder.swap()
+        self._send_output_frame()
+        self.stats.frames_sent += 1
 
     def _tx_loop(self) -> None:
         """Transmit loop - sends output frames at cycle rate."""
@@ -581,12 +600,7 @@ class CyclicController:
             now = time.perf_counter()
 
             if now >= next_send:
-                # In FAULT state, don't send output frames
-                if self._state != CyclicState.FAULT:
-                    # Swap double buffer and send
-                    self._output_builder.swap()
-                    self._send_output_frame()
-                    self.stats.frames_sent += 1
+                self._tx_cycle()
 
                 if first_frame:
                     first_frame = False
@@ -772,9 +786,10 @@ class CyclicController:
         if len(data) < 18:
             return
 
-        # Parse Ethernet header
+        # Parse Ethernet header; devices may send 802.1Q priority-tagged frames
         src_mac = data[6:12]
-        ethertype = EtherTypeStruct.parse(data[12:14]).ethertype
+        eth_offset = skip_vlan_tags(data)
+        ethertype = EtherTypeStruct.parse(data[eth_offset : eth_offset + 2]).ethertype
 
         if ethertype != ETHERTYPE_PROFINET:
             return
@@ -784,7 +799,7 @@ class CyclicController:
             return
 
         try:
-            frame = RTFrame.from_bytes(data[14:])
+            frame = RTFrame.from_bytes(data[eth_offset + 2 :])
         except ValueError:
             return
 
@@ -805,8 +820,9 @@ class CyclicController:
         # Cycle counter tracking
         self._track_cycle_counter(frame.cycle_counter)
 
-        # Check validity
-        if not frame.is_valid:
+        # Check validity. TransferStatus != 0 means the provider flagged a
+        # transfer problem; conformant consumers discard such frames.
+        if not frame.is_valid or frame.transfer_status != 0:
             self.stats.frames_invalid += 1
             return
 

@@ -17,9 +17,9 @@ from profinet.rt import (
     DATA_STATUS_VALID,
     IOCR_TYPE_INPUT,
     IOCR_TYPE_OUTPUT,
+    IOXS_BAD,
     IOCRConfig,
     IODataObject,
-    IOXS_BAD,
 )
 
 

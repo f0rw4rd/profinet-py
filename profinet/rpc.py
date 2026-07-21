@@ -294,6 +294,10 @@ EPM_INQUIRY_ALL = 0x00  # Return all entries
 EPM_INQUIRY_INTERFACE = 0x01  # Filter by interface UUID
 
 DEFAULT_TIMEOUT = 5.0
+
+# NDR ArgsMaximum floor: largest response payload we accept. Sized to fit
+# the 4096-byte UDP receive buffer including RPC/NDR header overhead.
+NDR_ARGS_MAXIMUM = 4000
 CONNECTION_TIMEOUT = 10
 
 
@@ -1000,11 +1004,18 @@ class RPCCon:
         )
 
     def _create_nrd(self, payload: bytes) -> PNNRDData:
-        """Create NRD (Network Representation Data) wrapper."""
+        """Create NRD (Network Representation Data) wrapper.
+
+        ArgsMaximum advertises the largest response we accept and must be
+        >= ArgsLength of the request, or devices reject the NDR header.
+        It also caps read() responses, so it tracks our receive buffer
+        rather than a fixed 1500.
+        """
+        args_maximum = max(NDR_ARGS_MAXIMUM, len(payload))
         return PNNRDData(
-            1500,  # args_maximum_status
+            args_maximum,  # args_maximum_status
             len(payload),  # args_length
-            1500,  # maximum_count
+            args_maximum,  # maximum_count
             0,  # offset
             len(payload),  # actual_count
             payload=payload,
@@ -1197,10 +1208,11 @@ class RPCCon:
             lt=0x8892,  # PROFINET EtherType
             iocr_properties=iocr_properties,
             data_length=data_length,
-            # RT_CLASS_1 frame IDs (controller proposes both):
-            # Input IOCR (device->controller): 0xC000-0xFBFF range
-            # Output IOCR (controller->device): 0x8000-0xBFFF range
-            frame_id=0xC000 + iocr_reference if iocr_type == 1 else 0x8000 + iocr_reference,
+            # RT_CLASS_1 frame IDs: the controller proposes the input CR
+            # frame ID in the RTC1 range (0xC000-0xF7FF); for the output CR
+            # it sends 0xFFFF and the device assigns the real frame ID,
+            # returned in the IOCRBlockRes of the Connect response.
+            frame_id=0xC000 + iocr_reference if iocr_type == 1 else 0xFFFF,
             send_clock_factor=setup.send_clock_factor,
             reduction_ratio=setup.reduction_ratio,
             phase=1,  # Phase within reduction cycle (1-based)

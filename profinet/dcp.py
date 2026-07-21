@@ -968,6 +968,7 @@ def set_param(
     param: str,
     value: str,
     timeout_sec: int = 5,
+    permanent: bool = False,
 ) -> bool:
     """Write a parameter to a PROFINET device.
 
@@ -975,9 +976,11 @@ def set_param(
         sock: Raw Ethernet socket
         src: Source MAC address (6 bytes)
         target: Target device MAC address string
-        param: Parameter name ("name" or "ip")
+        param: Parameter name ("name")
         value: New parameter value
         timeout_sec: Timeout in seconds
+        permanent: If True, request permanent storage (survives power
+            cycle); default writes a temporary value
 
     Returns:
         True on success, False if timeout
@@ -986,6 +989,11 @@ def set_param(
         DCPError: If parameter name is unknown or device returns error
         ValueError: If name exceeds DCP_MAX_NAME_LENGTH (240 chars)
     """
+    if param == "ip":
+        # The IP suite must be sent as 12 binary bytes (IP+mask+gateway),
+        # not an ASCII string; an ASCII value fails the device's length
+        # check and is never applied.
+        raise DCPError("Use set_ip() to configure the IP address")
     if param not in PARAMS:
         raise DCPError(f"Unknown parameter: {param!r}. Valid: {list(PARAMS.keys())}")
 
@@ -1000,24 +1008,27 @@ def set_param(
     value_bytes = bytes(value, encoding="ascii")
     xid = _generate_xid()
 
-    # Add padding for block qualifier (2 bytes)
+    # BlockQualifier (2 bytes): bit 0 = store permanently
+    qualifier = b"\x00\x01" if permanent else b"\x00\x00"
     block = PNDCPBlockRequest(
         param_tuple[0],
         param_tuple[1],
         len(value_bytes) + 2,
-        payload=bytes([0x00, 0x00]) + value_bytes,
+        payload=qualifier + value_bytes,
     )
 
-    # Calculate length with padding
-    padding = 1 if len(value_bytes) % 2 == 1 else 0
+    # Odd-length blocks carry a pad byte, included in DCPDataLength
+    block_data = bytes(block)
+    if len(value_bytes) % 2 == 1:
+        block_data += b"\x00"
     dcp = PNDCPHeader(
         DCP_GET_SET_FRAME_ID,
         PNDCPHeader.SET,
         PNDCPHeader.REQUEST,
         xid,
         0,
-        len(value_bytes) + 6 + padding,
-        payload=block,
+        len(block_data),
+        payload=block_data,
     )
     eth = EthernetHeader(dst, src, PROFINET_ETHERTYPE, payload=dcp)
 
@@ -1544,7 +1555,8 @@ def signal_device(
         sock: Raw Ethernet socket
         src: Source MAC address (6 bytes)
         target: Target device MAC address string
-        duration_ms: Flash duration in milliseconds (default: 3000)
+        duration_ms: Ignored; the spec defines only "flash once" and the
+            device controls the blink pattern. Kept for API compatibility.
         timeout_sec: Response timeout in seconds
 
     Returns:
@@ -1553,13 +1565,9 @@ def signal_device(
     dst = s2mac(target)
     xid = _generate_xid()
 
-    # Signal block data: BlockInfo (2 bytes) + SignalValue (2 bytes)
-    # BlockInfo: 0x0001 = temporary signal
-    # SignalValue: duration in 100ms units
-    duration_units = max(1, duration_ms // 100)  # Convert to 100ms units
-    block_info = bytes([0x00, 0x01])  # Temporary signal
-    signal_value = duration_units.to_bytes(2, "big")
-    block_data = block_info + signal_value
+    # Signal block data: BlockQualifier 0x0000 + SignalValue 0x0100
+    # ("flash once") - the only value defined by IEC 61158-6-10
+    block_data = bytes([0x00, 0x00, 0x01, 0x00])
 
     block = PNDCPBlockRequest(
         DCP_OPTION_CONTROL,

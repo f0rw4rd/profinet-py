@@ -106,7 +106,14 @@ def cmd_set_param(args: argparse.Namespace) -> int:
     try:
         src = get_mac(args.interface)
 
-        success = dcp.set_param(sock, src, args.target, args.param, args.value)
+        success = dcp.set_param(
+            sock,
+            src,
+            args.target,
+            args.param,
+            args.value,
+            permanent=getattr(args, "permanent", False),
+        )
         if success:
             print(f"Set {args.param} = {args.value}")
             return 0
@@ -642,8 +649,13 @@ def create_parser() -> argparse.ArgumentParser:
     # set-param
     sub = subparsers.add_parser("set-param", help="Write device parameter")
     sub.add_argument("target", metavar="MAC", help="Device MAC address (e.g. aa:bb:cc:dd:ee:ff)")
-    sub.add_argument("param", choices=["name", "ip"], help="Parameter to write")
+    sub.add_argument("param", choices=["name"], help="Parameter to write (use set-ip for IP)")
     sub.add_argument("value", help="New value")
+    sub.add_argument(
+        "--permanent",
+        action="store_true",
+        help="Store permanently (survives device power cycle)",
+    )
     sub.set_defaults(func=cmd_set_param)
 
     # read

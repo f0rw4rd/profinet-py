@@ -19,6 +19,7 @@ from profinet.rt import (
     IOCR_TYPE_OUTPUT,
     IOCRConfig,
     IODataObject,
+    IOXS_BAD,
 )
 
 
@@ -346,6 +347,20 @@ class TestWatchdogBehavior:
         for _ in range(100):
             ctrl._handle_watchdog_timeout()
         assert ctrl.state == CyclicState.RUNNING  # never goes to FAULT
+
+    def test_disable_fault_with_zero_keeps_iocs_good(self):
+        ctrl = make_controller(max_consecutive_timeouts=0)
+        ctrl._state = CyclicState.RUNNING
+        ctrl._output_builder.set_all_iocs = MagicMock()
+        ctrl._handle_watchdog_timeout()
+        ctrl._output_builder.set_all_iocs.assert_not_called()
+
+    def test_watchdog_timeout_marks_iocs_bad_when_faulting_enabled(self):
+        ctrl = make_controller(max_consecutive_timeouts=3)
+        ctrl._state = CyclicState.RUNNING
+        ctrl._output_builder.set_all_iocs = MagicMock()
+        ctrl._handle_watchdog_timeout()
+        ctrl._output_builder.set_all_iocs.assert_called_once_with(IOXS_BAD)
 
     def test_consecutive_timeouts_reset_on_rx(self):
         """Receiving a frame resets the consecutive timeout counter.

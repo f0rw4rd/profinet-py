@@ -729,8 +729,12 @@ class CyclicController:
         self.stats.frames_missed += 1
         self.stats.consecutive_timeouts += 1
 
-        # Set IOCS to BAD - we haven't received valid input
-        self._output_builder.set_all_iocs(IOXS_BAD)
+        # Set IOCS to BAD only when watchdog faulting is enabled. With
+        # max_consecutive_timeouts=0 the watchdog is monitoring-only; keep
+        # consumer status GOOD so transient RX gaps do not make the device drop
+        # an otherwise active output relationship.
+        if self.max_consecutive_timeouts > 0:
+            self._output_builder.set_all_iocs(IOXS_BAD)
 
         if self._on_timeout:
             try:

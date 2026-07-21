@@ -2905,7 +2905,7 @@ class RPCCon:
         Per IEC 61158-6-10, CONTROL is used for AR lifecycle state transitions:
         - PrmEnd (0x0110, cmd=0x0001): End parameter phase
         - ApplicationReady (0x0112, cmd=0x0002): Signal ready for cyclic IO
-        - PrmBegin (0x0118, cmd=0x0007): Begin (re-)parameterization
+        - PrmBegin (0x0118, cmd=0x0040): Begin (re-)parameterization
 
         All use the same IODControlReq block structure (same as ReleaseBlock).
         Some commands (notably ApplicationReady) may include additional sub-blocks

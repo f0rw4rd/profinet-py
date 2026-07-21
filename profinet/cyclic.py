@@ -61,6 +61,7 @@ from .rt import (
     ETHERTYPE_PROFINET,
     IOXS_BAD,
     IOXS_GOOD,
+    VLAN_TAG_RT,
     CyclicDataBuilder,
     EtherTypeStruct,
     IOCRConfig,
@@ -664,7 +665,9 @@ class CyclicController:
         )
 
         # Build Ethernet frame
-        eth_frame = self.dst_mac + self.src_mac + _ETHERTYPE_PROFINET_BYTES + frame.to_bytes()
+        eth_frame = (
+            self.dst_mac + self.src_mac + VLAN_TAG_RT + _ETHERTYPE_PROFINET_BYTES + frame.to_bytes()
+        )
 
         try:
             self._tx_sock.send(eth_frame)

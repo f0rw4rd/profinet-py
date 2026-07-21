@@ -212,10 +212,14 @@ class TestAlarmAckPDUType:
         assert listener._sock.send.called
         sent_frame = listener._sock.send.call_args[0][0]
 
-        # Parse the RTA header: starts after dst(6) + src(6) + ethertype(2) + frame_id(2) = 16
-        rta_pdu_type = sent_frame[16 + 4]  # offset 4 in RTA header is pdu_type
-        rta_type = (rta_pdu_type >> 4) & 0x0F
-        rta_version = rta_pdu_type & 0x0F
+        # Parse the RTA header: after dst(6) + src(6) + VLAN tag + ethertype(2)
+        # + frame_id(2); pdu_type byte: version high nibble, type low nibble
+        from profinet.util import skip_vlan_tags
+
+        eth_offset = skip_vlan_tags(sent_frame)
+        rta_pdu_type = sent_frame[eth_offset + 4 + 4]  # offset 4 in RTA header
+        rta_type = rta_pdu_type & 0x0F
+        rta_version = (rta_pdu_type >> 4) & 0x0F
 
         assert rta_type == PNRTAHeader.RTA_TYPE_DATA  # 0x01, not 0x03
         assert rta_version == PNRTAHeader.VERSION_1
@@ -358,8 +362,10 @@ class TestAlarmAckFrameID:
         listener._send_layer2_ack(ack_data, b"\x22" * 6, high_priority=True)
 
         sent_frame = listener._sock.send.call_args[0][0]
-        # Frame ID is at offset 14 (after dst+src+ethertype)
-        frame_id = struct.unpack_from(">H", sent_frame, 14)[0]
+        # Frame ID follows dst+src+VLAN tag+ethertype
+        from profinet.util import skip_vlan_tags
+
+        frame_id = struct.unpack_from(">H", sent_frame, skip_vlan_tags(sent_frame) + 2)[0]
         assert frame_id == FRAME_ID_ALARM_HIGH
 
     def test_low_priority_alarm_uses_low_frame_id(self):
@@ -383,5 +389,7 @@ class TestAlarmAckFrameID:
         listener._send_layer2_ack(ack_data, b"\x22" * 6, high_priority=False)
 
         sent_frame = listener._sock.send.call_args[0][0]
-        frame_id = struct.unpack_from(">H", sent_frame, 14)[0]
+        from profinet.util import skip_vlan_tags
+
+        frame_id = struct.unpack_from(">H", sent_frame, skip_vlan_tags(sent_frame) + 2)[0]
         assert frame_id == FRAME_ID_ALARM_LOW

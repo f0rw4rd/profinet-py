@@ -53,6 +53,12 @@ EtherTypeStruct = cs.Struct(
 # 0x8000-0xBFFF is a separate range (RT_CLASS_2 in pre-V2.3 spec naming)
 FRAME_ID_RT_CLASS_1_MIN = 0xC000
 FRAME_ID_RT_CLASS_1_MAX = 0xF7FF
+
+# 802.1Q priority tag for cyclic RT frames per IEC 61158-6-10: TPID 0x8100,
+# PCP 6, VID 0 (TCI 0xC000, matching the negotiated IOCRTagHeader). Devices
+# validate the negotiated priority, and managed switches may drop untagged
+# sub-64-byte RT frames as runts, so TX frames must carry the tag.
+VLAN_TAG_RT = b"\x81\x00\xc0\x00"
 FRAME_ID_ALARM_HIGH = 0xFC01
 FRAME_ID_ALARM_LOW = 0xFE01
 
@@ -608,7 +614,7 @@ def build_ethernet_frame(
     Returns:
         Complete Ethernet frame bytes
     """
-    return dst_mac + src_mac + _ETHERTYPE_PROFINET_BYTES + rt_frame.to_bytes()
+    return dst_mac + src_mac + VLAN_TAG_RT + _ETHERTYPE_PROFINET_BYTES + rt_frame.to_bytes()
 
 
 def parse_ethernet_frame(data: bytes) -> Optional[RTFrame]:

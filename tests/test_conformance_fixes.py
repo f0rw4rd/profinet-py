@@ -211,12 +211,18 @@ def parse_sent_rta(frame):
     """Parse a frame our listener sent: returns (frame_id, rta fields, var_part)."""
     assert frame[0:6] == DEV_MAC
     assert frame[6:12] == CTRL_MAC
-    assert frame[12:14] == b"\x88\x92"
-    frame_id = struct.unpack(">H", frame[14:16])[0]
+    # TX frames must be 802.1Q priority-tagged (PCP 6 high / 5 low, VID 0)
+    assert frame[12:14] == b"\x81\x00"
+    tci = struct.unpack(">H", frame[14:16])[0]
+    assert tci in (0xC000, 0xA000)
+    assert frame[16:18] == b"\x88\x92"
+    frame_id = struct.unpack(">H", frame[18:20])[0]
+    # High-prio alarms carry PCP 6, low-prio PCP 5
+    assert tci == (0xC000 if frame_id == 0xFC01 else 0xA000)
     dst_ref, src_ref, pdu_type, add_flags, send_seq, ack_seq, var_len = struct.unpack(
-        ">HHBBHHH", frame[16:28]
+        ">HHBBHHH", frame[20:32]
     )
-    var_part = frame[28:]
+    var_part = frame[32:]
     assert var_len == len(var_part)
     return {
         "frame_id": frame_id,
@@ -510,6 +516,108 @@ class TestRTAIntegration:
             ),
         )
         assert listener._exp_seq_num == 0x0000  # wraps modulo 0x8000
+
+
+class TestAlarmAckRetransmission:
+    def _receive_alarm(self, listener):
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_DATA,
+                ADD_FLAGS_WINDOW_1 | ADD_FLAGS_TACK,
+                send_seq=0xFFFF,
+                ack_seq=0xFFFE,
+                var_part=build_alarm_block(),
+            ),
+        )
+
+    def test_alarm_ack_sets_pending_retransmit(self):
+        listener = make_listener()
+        self._receive_alarm(listener)
+        assert listener._pending_ack is not None
+        frame, _, retries = listener._pending_ack
+        assert retries == listener.endpoint.rta_retries
+        # Pending frame is the AlarmAck DATA PDU we sent
+        assert parse_sent_rta(frame)["pdu_type"] == 0x11
+
+    def test_retransmits_when_overdue(self):
+        listener = make_listener()
+        self._receive_alarm(listener)
+        listener._sock.send.reset_mock()
+        listener._pending_ack[1] = 0  # force overdue
+        listener._check_retransmit()
+        listener._sock.send.assert_called_once()
+        assert listener._pending_ack[2] == listener.endpoint.rta_retries - 1
+
+    def test_gives_up_after_retries_exhausted(self):
+        listener = make_listener()
+        self._receive_alarm(listener)
+        listener._sock.send.reset_mock()
+        for _ in range(listener.endpoint.rta_retries + 1):
+            listener._pending_ack[1] = 0
+            listener._check_retransmit()
+        assert listener._pending_ack is None
+        assert listener._sock.send.call_count == listener.endpoint.rta_retries
+
+    def test_not_retransmitted_before_timeout(self):
+        listener = make_listener()
+        self._receive_alarm(listener)
+        listener._sock.send.reset_mock()
+        listener._check_retransmit()  # next_time still in the future
+        listener._sock.send.assert_not_called()
+
+    def test_transport_ack_clears_pending(self):
+        listener = make_listener()
+        self._receive_alarm(listener)
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_ACK, ADD_FLAGS_WINDOW_1, send_seq=0xFFFF, ack_seq=0xFFFF
+            ),
+        )
+        assert listener._pending_ack is None
+
+
+class TestCyclicTxVlanTag:
+    def test_output_frame_is_priority_tagged(self):
+        ctrl = make_controller()
+        ctrl._tx_sock = MagicMock()
+        ctrl._send_output_frame()
+        frame = ctrl._tx_sock.send.call_args.args[0]
+        assert frame[0:6] == DEV_MAC
+        assert frame[6:12] == CTRL_MAC
+        assert frame[12:16] == b"\x81\x00\xc0\x00"  # PCP 6, VID 0
+        assert frame[16:18] == b"\x88\x92"
+
+
+class TestReadImplicitWiring:
+    def test_device_read_falls_back_to_implicit(self):
+        from unittest.mock import patch
+
+        from profinet.device import ProfinetDevice
+        from profinet.exceptions import RPCConnectionError
+
+        info = type("Info", (), {"name": "dev", "ip": "1.2.3.4", "mac": "aa:bb:cc:dd:ee:ff"})()
+        device = ProfinetDevice(info, "eth0", CTRL_MAC)
+        with patch.object(ProfinetDevice, "connect", side_effect=RPCConnectionError("rejected")):
+            with patch.object(ProfinetDevice, "read_implicit", return_value=b"\x99") as implicit:
+                assert device.read(0, 1, 0xAFF0) == b"\x99"
+        implicit.assert_called_once_with(0, 1, 0xAFF0, api=0)
+
+    def test_device_read_implicit_uses_fresh_rpc_when_disconnected(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from profinet.device import ProfinetDevice
+
+        info = type("Info", (), {"name": "dev", "ip": "1.2.3.4", "mac": "aa:bb:cc:dd:ee:ff"})()
+        device = ProfinetDevice(info, "eth0", CTRL_MAC)
+        rpc = MagicMock()
+        rpc.read_implicit.return_value = SimpleNamespace(payload=b"\x42")
+        with patch("profinet.device.RPCCon", return_value=rpc):
+            assert device.read_implicit(0, 1, 0xAFF0) == b"\x42"
+        rpc.read_implicit.assert_called_once_with(0, 0, 1, 0xAFF0)
+        rpc.close.assert_called_once()
 
 
 class TestAlarmSpecifierBits:

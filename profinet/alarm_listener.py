@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import socket
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import List, Optional
@@ -60,6 +61,12 @@ SEQ_NUM_INIT = 0xFFFF
 SEQ_NUM_INIT_O = 0xFFFE
 SEQ_NUM_MASK = 0x7FFF
 
+# 802.1Q priority tags for alarm frames per IEC 61158-6-10: PCP 6 for the
+# high-priority alarm CR, PCP 5 for low priority, VID 0 (matching the
+# negotiated AlarmCRTagHeaderHigh/Low values 0xC000/0xA000)
+VLAN_TAG_ALARM_HIGH = b"\x81\x00\xc0\x00"
+VLAN_TAG_ALARM_LOW = b"\x81\x00\xa0\x00"
+
 
 @dataclass
 class AlarmEndpoint:
@@ -83,6 +90,12 @@ class AlarmEndpoint:
 
     transport: int = 0
     """Transport type: 0=Layer2 (RTA), 1=UDP."""
+
+    rta_timeout_factor: int = 1
+    """Negotiated RTATimeoutFactor (retransmit interval = factor x 100ms)."""
+
+    rta_retries: int = 3
+    """Negotiated RTARetries (retransmissions before giving up)."""
 
 
 class AlarmListener:
@@ -126,6 +139,11 @@ class AlarmListener:
         self._send_seq_num_o: int = SEQ_NUM_INIT_O
         self._exp_seq_num: int = SEQ_NUM_INIT
         self._exp_seq_num_o: int = SEQ_NUM_INIT_O
+
+        # Retransmission state for our unacknowledged AlarmAck DATA PDU:
+        # [frame bytes, next retransmit time (monotonic), retries left].
+        # Accessed only from the listener thread.
+        self._pending_ack: Optional[list] = None
 
     def add_callback(self, callback: Callable[[AlarmNotification], None]) -> None:
         """Register callback for received alarms.
@@ -227,8 +245,9 @@ class AlarmListener:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("0.0.0.0", 34964))  # nosec B104 — must receive from any interface
 
-        # Non-blocking timeout for clean shutdown
-        sock.settimeout(1.0)
+        # Short timeout: bounds shutdown latency and paces the AlarmAck
+        # retransmission check (100ms base interval)
+        sock.settimeout(0.1)
         return sock
 
     def _listen_loop(self) -> None:
@@ -237,6 +256,7 @@ class AlarmListener:
 
         while self._running:
             try:
+                self._check_retransmit()
                 if self.endpoint.transport == 0:
                     self._handle_layer2_frame()
                 else:
@@ -368,6 +388,7 @@ class AlarmListener:
                 if rta_header.ack_seq_num == self._send_seq_num:
                     self._send_seq_num_o = self._send_seq_num
                     self._send_seq_num = (self._send_seq_num + 1) & SEQ_NUM_MASK
+                    self._pending_ack = None
 
                 # The device retransmits and then aborts the AR without this
                 self._send_transport_ack(src_mac, bool(high_priority))
@@ -403,13 +424,14 @@ class AlarmListener:
         if rta_header.ack_seq_num == self._send_seq_num:
             self._send_seq_num_o = self._send_seq_num
             self._send_seq_num = (self._send_seq_num + 1) & SEQ_NUM_MASK
+            self._pending_ack = None
             logger.debug(f"RTA transport ack received (seq={rta_header.ack_seq_num})")
         else:
             logger.debug(
                 f"Stale RTA ack (ack_seq={rta_header.ack_seq_num}, expected {self._send_seq_num})"
             )
 
-    def _send_rta_frame(
+    def _build_rta_frame(
         self,
         pdu_type: int,
         add_flags: int,
@@ -418,8 +440,8 @@ class AlarmListener:
         var_part: bytes,
         dst_mac: bytes,
         high_priority: bool,
-    ) -> None:
-        """Build and send an RTA PDU (Layer 2)."""
+    ) -> bytes:
+        """Build a complete Ethernet frame carrying an RTA PDU."""
         rta_header = PNRTAHeader(
             alarm_dst_endpoint=self.endpoint.device_ref,
             alarm_src_endpoint=self.endpoint.controller_ref,
@@ -430,21 +452,70 @@ class AlarmListener:
             var_part_len=len(var_part),
             payload=b"",
         )
-        frame_id_bytes = (
-            cs.Int16ub.build(FRAME_ID_ALARM_HIGH) if high_priority else _FRAME_ID_ALARM_LOW_BYTES
-        )
-        eth_frame = (
+        if high_priority:
+            vlan_tag = VLAN_TAG_ALARM_HIGH
+            frame_id_bytes = cs.Int16ub.build(FRAME_ID_ALARM_HIGH)
+        else:
+            vlan_tag = VLAN_TAG_ALARM_LOW
+            frame_id_bytes = _FRAME_ID_ALARM_LOW_BYTES
+        return (
             dst_mac
             + self.controller_mac
+            + vlan_tag
             + _ETHERTYPE_PROFINET_BYTES
             + frame_id_bytes
             + bytes(rta_header)
             + var_part
         )
+
+    def _send_frame(self, eth_frame: bytes) -> None:
         try:
             self._sock.send(eth_frame)
         except Exception as e:
             logger.error(f"Layer 2 send error: {e}")
+
+    def _send_rta_frame(
+        self,
+        pdu_type: int,
+        add_flags: int,
+        send_seq_num: int,
+        ack_seq_num: int,
+        var_part: bytes,
+        dst_mac: bytes,
+        high_priority: bool,
+    ) -> bytes:
+        """Build and send an RTA PDU (Layer 2); returns the frame bytes."""
+        eth_frame = self._build_rta_frame(
+            pdu_type, add_flags, send_seq_num, ack_seq_num, var_part, dst_mac, high_priority
+        )
+        self._send_frame(eth_frame)
+        return eth_frame
+
+    def _check_retransmit(self) -> None:
+        """Retransmit the pending AlarmAck if its transport ACK is overdue.
+
+        Uses the negotiated RTATimeoutFactor (x100ms) and RTARetries; a
+        conformant sender aborts the AR after the final timeout - as a
+        listener we log the failure and stop retrying.
+        """
+        if not self._pending_ack:
+            return
+        frame, next_time, retries_left = self._pending_ack
+        if time.monotonic() < next_time:
+            return
+        if retries_left > 0:
+            logger.debug(
+                f"AlarmAck transport ACK overdue, retransmitting ({retries_left} retries left)"
+            )
+            self._send_frame(frame)
+            interval = self.endpoint.rta_timeout_factor * 0.1
+            self._pending_ack = [frame, time.monotonic() + interval, retries_left - 1]
+        else:
+            logger.error(
+                f"AlarmAck not acknowledged after {self.endpoint.rta_retries} "
+                f"retransmissions; device may abort the AR"
+            )
+            self._pending_ack = None
 
     def _send_transport_ack(self, dst_mac: bytes, high_priority: bool) -> None:
         """Send a pure RTA-ACK (TACK) with empty var part."""
@@ -547,7 +618,7 @@ class AlarmListener:
             dst_mac: Destination MAC address
             high_priority: True for high-priority alarm ack frame ID
         """
-        self._send_rta_frame(
+        frame = self._send_rta_frame(
             PNRTAHeader.RTA_TYPE_DATA,
             ADD_FLAGS_WINDOW_1 | ADD_FLAGS_TACK,
             self._send_seq_num,
@@ -556,6 +627,8 @@ class AlarmListener:
             dst_mac,
             high_priority,
         )
+        interval = self.endpoint.rta_timeout_factor * 0.1
+        self._pending_ack = [frame, time.monotonic() + interval, self.endpoint.rta_retries]
 
     def _send_udp_ack(self, ack_data: bytes, dst_addr: tuple) -> None:
         """Send acknowledgment via UDP.

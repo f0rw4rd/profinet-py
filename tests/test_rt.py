@@ -418,8 +418,9 @@ class TestEthernetFrameHelpers:
 
         assert eth[0:6] == dst
         assert eth[6:12] == src
-        assert eth[12:14] == b"\x88\x92"  # PROFINET EtherType
-        assert eth[14:16] == b"\xc0\x00"  # Frame ID
+        assert eth[12:16] == b"\x81\x00\xc0\x00"  # 802.1Q tag, PCP 6, VID 0
+        assert eth[16:18] == b"\x88\x92"  # PROFINET EtherType
+        assert eth[18:20] == b"\xc0\x00"  # Frame ID
 
     def test_parse_ethernet_frame(self):
         """Test parsing Ethernet frame."""

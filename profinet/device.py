@@ -623,9 +623,49 @@ class ProfinetDevice:
             RPCError: If read fails
             PNIOError: If device returns PNIO error
         """
-        rpc = self._ensure_connected()
+        try:
+            rpc = self._ensure_connected()
+        except RPCConnectionError:
+            # Some device stacks (e.g. p-net) do not implement the Device
+            # Access AR; the AR-less Read Implicit service still works there.
+            logger.info("AR connect failed, falling back to Read Implicit")
+            return self.read_implicit(slot, subslot, index, api=api)
         iod = rpc.read(api=api, slot=slot, subslot=subslot, idx=index)
         return iod.payload
+
+    def read_implicit(
+        self,
+        slot: int,
+        subslot: int,
+        index: int,
+        api: int = 0,
+    ) -> bytes:
+        """Read a record via the AR-less Read Implicit service.
+
+        Addresses the device by IP only (ARUUID = 0), so it works against
+        devices that reject the Device Access AR. Read-only; writes always
+        require an established AR.
+
+        Args:
+            slot: Slot number
+            subslot: Subslot number
+            index: Record index
+            api: API number (default: 0)
+
+        Returns:
+            Raw record data (without block header)
+
+        Raises:
+            RPCError: If the read fails
+            PNIOError: If device returns PNIO error
+        """
+        if self._connected and self._rpc:
+            return self._rpc.read_implicit(api, slot, subslot, index).payload
+        rpc = RPCCon(self._info, timeout=self._timeout)
+        try:
+            return rpc.read_implicit(api, slot, subslot, index).payload
+        finally:
+            rpc.close()
 
     def write(
         self,

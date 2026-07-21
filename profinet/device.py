@@ -53,7 +53,7 @@ from .rpc import (
     epm_lookup,
     get_station_info,
 )
-from .util import ethernet_socket, get_mac
+from .util import ethernet_socket, get_mac, s2mac
 
 logger = logging.getLogger(__name__)
 
@@ -512,6 +512,18 @@ class ProfinetDevice:
             self.connect()
         assert self._rpc is not None
         return self._rpc
+
+    def _release_ar(self, rpc: RPCCon) -> None:
+        """Best-effort AR teardown: stop alarms, Release, close, clear state."""
+        self.stop_alarm_listener()
+        try:
+            rpc.disconnect()
+        except Exception as e:
+            logger.debug(f"AR release failed: {e}")
+        rpc.close()
+        if self._rpc is rpc:
+            self._rpc = None
+            self._connected = False
 
     # =========================================================================
     # Device Info
@@ -1029,7 +1041,7 @@ class ProfinetDevice:
         # Create endpoint from RPC state
         device_mac = self._info.mac
         if isinstance(device_mac, str):
-            device_mac = bytes.fromhex(device_mac.replace(":", ""))
+            device_mac = s2mac(device_mac)
 
         endpoint = AlarmEndpoint(
             interface=self._interface,
@@ -1137,15 +1149,7 @@ class ProfinetDevice:
         # acyclic records, close it first instead of reconnecting in-place; some
         # devices reject an IOCARSingle negotiated over the existing RPC object.
         if self._rpc is not None:
-            # An alarm listener bound to the old AR must not outlive it.
-            self.stop_alarm_listener()
-            try:
-                if self._connected:
-                    self._rpc.disconnect()
-            finally:
-                self._rpc.close()
-                self._rpc = None
-                self._connected = False
+            self._release_ar(self._rpc)
 
         rpc = RPCCon(self._info, timeout=self._timeout)
         cyclic = None
@@ -1160,7 +1164,7 @@ class ProfinetDevice:
 
             dst_mac = self._info.mac
             if isinstance(dst_mac, str):
-                dst_mac = bytes.fromhex(dst_mac.replace(":", ""))
+                dst_mac = s2mac(dst_mac)
 
             input_iocr, output_iocr = build_iocr_configs(
                 slots=iocr_setup.slots,
@@ -1195,21 +1199,14 @@ class ProfinetDevice:
                 rpc.application_ready(timeout=30.0)
 
             if not start_rt_before_prm_end:
+                # Deferred RT start: opposite branch of the pre-PrmEnd start above
                 cyclic.start()
 
             return cyclic
         except Exception:
             if cyclic is not None:
                 cyclic.stop()
-            self.stop_alarm_listener()
-            try:
-                rpc.disconnect()
-            except Exception as e:
-                logger.debug(f"AR release failed during start_cyclic rollback: {e}")
-            rpc.close()
-            if self._rpc is rpc:
-                self._rpc = None
-                self._connected = False
+            self._release_ar(rpc)
             raise
 
     # =========================================================================

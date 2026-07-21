@@ -297,6 +297,9 @@ class CyclicController:
         # until the controller reports that it is consuming input data.
         self._output_builder.set_all_iops(IOXS_GOOD)
         self._output_builder.set_all_iocs(IOXS_GOOD)
+        # Tracks the watchdog-driven IOCS state so the RX/timeout paths only
+        # rewrite the buffer on transitions (both run on the RX thread).
+        self._iocs_good = True
 
         # Callbacks
         self._on_input_data: Optional[Callable[[int, int, bytes], None]] = None
@@ -733,8 +736,9 @@ class CyclicController:
         # max_consecutive_timeouts=0 the watchdog is monitoring-only; keep
         # consumer status GOOD so transient RX gaps do not make the device drop
         # an otherwise active output relationship.
-        if self.max_consecutive_timeouts > 0:
+        if self.max_consecutive_timeouts > 0 and self._iocs_good:
             self._output_builder.set_all_iocs(IOXS_BAD)
+            self._iocs_good = False
 
         if self._on_timeout:
             try:
@@ -806,8 +810,12 @@ class CyclicController:
             self.stats.frames_invalid += 1
             return
 
-        # Set IOCS to GOOD - we received valid input data
-        self._output_builder.set_all_iocs(IOXS_GOOD)
+        # Set IOCS to GOOD - we received valid input data. Only rewrite the
+        # buffer on a BAD->GOOD transition; set_all_iocs dirties the whole
+        # send buffer and this runs for every received frame.
+        if not self._iocs_good:
+            self._output_builder.set_all_iocs(IOXS_GOOD)
+            self._iocs_good = True
 
         # Extract data per IO object
         with self._input_lock:

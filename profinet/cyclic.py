@@ -292,8 +292,11 @@ class CyclicController:
         # Check and warn about cycle time
         self._check_cycle_time()
 
-        # Initialize all IOPS to good
+        # Initialize provider and consumer status to good before the first
+        # transmitted frame. Some IO devices do not start their input provider
+        # until the controller reports that it is consuming input data.
         self._output_builder.set_all_iops(IOXS_GOOD)
+        self._output_builder.set_all_iocs(IOXS_GOOD)
 
         # Callbacks
         self._on_input_data: Optional[Callable[[int, int, bytes], None]] = None
@@ -726,8 +729,12 @@ class CyclicController:
         self.stats.frames_missed += 1
         self.stats.consecutive_timeouts += 1
 
-        # Set IOCS to BAD - we haven't received valid input
-        self._output_builder.set_all_iocs(IOXS_BAD)
+        # Set IOCS to BAD only when watchdog faulting is enabled. With
+        # max_consecutive_timeouts=0 the watchdog is monitoring-only; keep
+        # consumer status GOOD so transient RX gaps do not make the device drop
+        # an otherwise active output relationship.
+        if self.max_consecutive_timeouts > 0:
+            self._output_builder.set_all_iocs(IOXS_BAD)
 
         if self._on_timeout:
             try:

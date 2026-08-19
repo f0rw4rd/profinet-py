@@ -60,6 +60,7 @@ from .rt import (
     DATA_STATUS_VALID,
     ETHERTYPE_PROFINET,
     IOXS_BAD,
+    IOXS_DATA_STATE_GOOD,
     IOXS_GOOD,
     VLAN_TAG_RT,
     CyclicDataBuilder,
@@ -280,6 +281,9 @@ class CyclicController:
         self._cycle_counter = 0
         self._output_builder = CyclicDataBuilder(output_iocr)
         self._input_data: Dict[Tuple[int, int], bytes] = {}
+        # Last provider status (IOPS) the device sent per submodule. Payload
+        # bytes are only meaningful while the matching IOPS reports GOOD.
+        self._input_status: Dict[Tuple[int, int], int] = {}
         self._input_lock = threading.Lock()
 
         # Cycle counter tracking for RX
@@ -305,6 +309,7 @@ class CyclicController:
 
         # Callbacks
         self._on_input_data: Optional[Callable[[int, int, bytes], None]] = None
+        self._on_input_status: Optional[Callable[[int, int, int], None]] = None
         self._on_timeout: Optional[Callable[[], None]] = None
         self._on_error: Optional[Callable[[str], None]] = None
         self._on_state_change: Optional[Callable[[CyclicState, CyclicState], None]] = None
@@ -382,20 +387,59 @@ class CyclicController:
         self._output_builder.set_data(slot, subslot, data)
         self._output_builder.set_iops(slot, subslot, IOXS_GOOD)
 
-    def get_input_data(self, slot: int, subslot: int) -> Optional[bytes]:
+    def get_input_data(self, slot: int, subslot: int, allow_bad: bool = False) -> Optional[bytes]:
         """Get latest input data from device.
 
         Thread-safe - can be called from any thread.
+
+        Data whose IOPS is BAD must not be used by the application: the device
+        is telling us the payload is not valid (module pulled, sensor faulted),
+        and the bytes it keeps sending are stale. Such data is withheld unless
+        allow_bad is set. Use get_input_status() to inspect the raw IOPS.
+
+        Args:
+            slot: Slot number
+            subslot: Subslot number
+            allow_bad: Return the payload even when the device marked IOPS BAD
+
+        Returns:
+            Latest input data bytes, or None if not received or IOPS is BAD
+        """
+        with self._input_lock:
+            if not allow_bad and not self._is_input_good(slot, subslot):
+                return None
+            return self._input_data.get((slot, subslot))
+
+    def get_input_status(self, slot: int, subslot: int) -> Optional[int]:
+        """Get the provider status (IOPS) the device sent for a submodule.
 
         Args:
             slot: Slot number
             subslot: Subslot number
 
         Returns:
-            Latest input data bytes, or None if not received
+            Raw IOPS byte (0x80 = GOOD), or None if nothing received yet
         """
         with self._input_lock:
-            return self._input_data.get((slot, subslot))
+            return self._input_status.get((slot, subslot))
+
+    def is_input_good(self, slot: int, subslot: int) -> bool:
+        """Whether the device currently reports GOOD provider status.
+
+        Args:
+            slot: Slot number
+            subslot: Subslot number
+
+        Returns:
+            True if the last received IOPS for this submodule was GOOD
+        """
+        with self._input_lock:
+            return self._is_input_good(slot, subslot)
+
+    def _is_input_good(self, slot: int, subslot: int) -> bool:
+        """IOPS check without taking the lock. Caller must hold _input_lock."""
+        status = self._input_status.get((slot, subslot))
+        return status is not None and bool(status & IOXS_DATA_STATE_GOOD)
 
     def on_input(self, callback: Callable[[int, int, bytes], None]) -> None:
         """Register callback for input data updates.
@@ -406,6 +450,20 @@ class CyclicController:
             callback: Function(slot, subslot, data) called on input
         """
         self._on_input_data = callback
+
+    def on_input_status(self, callback: Callable[[int, int, int], None]) -> None:
+        """Register callback for provider status (IOPS) changes.
+
+        Invoked from the RX thread whenever a submodule's IOPS transitions
+        between GOOD and BAD, which is how a device signals that its input data
+        has become invalid (module pulled, sensor faulted) without dropping the
+        AR. The frame keeps arriving with stale payload, so this is the only
+        notification the application gets.
+
+        Args:
+            callback: Function(slot, subslot, iops) called on IOPS transitions
+        """
+        self._on_input_status = callback
 
     def on_timeout(self, callback: Callable[[], None]) -> None:
         """Register callback for watchdog timeout.
@@ -836,18 +894,53 @@ class CyclicController:
             self._output_builder.set_all_iocs(IOXS_GOOD)
             self._iocs_good = True
 
-        # Extract data per IO object
+        # Extract data per IO object. Each submodule's payload is followed by
+        # its IOPS byte; the device sets it BAD to disown the data it is still
+        # sending, so the payload is only usable while IOPS reports GOOD.
+        status_events = []
+        data_events = []
         with self._input_lock:
             for obj in self.input_iocr.objects:
-                if obj.frame_offset + obj.data_length <= len(frame.payload):
-                    obj_data = frame.payload[obj.frame_offset : obj.frame_offset + obj.data_length]
-                    self._input_data[(obj.slot, obj.subslot)] = obj_data
+                if obj.iops_offset >= len(frame.payload):
+                    continue
+                if obj.frame_offset + obj.data_length > len(frame.payload):
+                    continue
 
-                    if self._on_input_data:
-                        try:
-                            self._on_input_data(obj.slot, obj.subslot, obj_data)
-                        except Exception as e:
-                            logger.error(f"Input callback error: {e}")
+                iops = frame.payload[obj.iops_offset]
+                key = (obj.slot, obj.subslot)
+                was_good = self._is_input_good(obj.slot, obj.subslot)
+                is_good = bool(iops & IOXS_DATA_STATE_GOOD)
+
+                self._input_status[key] = iops
+                self._input_data[key] = frame.payload[
+                    obj.frame_offset : obj.frame_offset + obj.data_length
+                ]
+
+                if is_good != was_good:
+                    status_events.append((obj.slot, obj.subslot, iops))
+                if is_good:
+                    data_events.append((obj.slot, obj.subslot, self._input_data[key]))
+
+        # Callbacks run outside the lock: they are application code and must not
+        # be able to stall the RX thread's next frame while holding it.
+        for slot, subslot, iops in status_events:
+            if not iops & IOXS_DATA_STATE_GOOD:
+                logger.warning(
+                    f"Slot {slot}/{subslot}: device reports IOPS BAD (0x{iops:02X}), "
+                    f"input data is no longer valid"
+                )
+            if self._on_input_status:
+                try:
+                    self._on_input_status(slot, subslot, iops)
+                except Exception as e:
+                    logger.error(f"Input status callback error: {e}")
+
+        if self._on_input_data:
+            for slot, subslot, obj_data in data_events:
+                try:
+                    self._on_input_data(slot, subslot, obj_data)
+                except Exception as e:
+                    logger.error(f"Input callback error: {e}")
 
     def _track_cycle_counter(self, rx_counter: int) -> None:
         """Track received cycle counter for gap/duplicate detection.

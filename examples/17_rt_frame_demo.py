@@ -171,7 +171,7 @@ def demo_ethernet_frame():
     print("Ethernet Frame Demo")
     print("=" * 60)
 
-    dst_mac = b"\xd0\xc8\x57\xe0\x1c\x2c"  # Device MAC
+    dst_mac = b"\x02\x00\x00\x00\x00\x01"  # Device MAC
     src_mac = b"\x00\x11\x22\x33\x44\x55"  # Controller MAC
 
     rt_frame = RTFrame(

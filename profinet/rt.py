@@ -21,6 +21,8 @@ from typing import List, Optional
 
 import construct as cs
 
+from .util import skip_vlan_tags
+
 # EtherType for PROFINET RT frames
 ETHERTYPE_PROFINET = 0x8892
 
@@ -84,6 +86,9 @@ DATA_STATUS_IGNORE = 0x80  # 1=Ignore frame
 IOXS_GOOD = 0x80  # Good data, subslot level
 IOXS_BAD = 0x00  # Bad data
 IOXS_EXTENSION = 0x01  # More IOxS follows
+# DataState is bit 7 of an IOxS byte; the lower bits carry Instance and
+# Extension, so a received IOxS must be masked rather than compared to IOXS_GOOD.
+IOXS_DATA_STATE_GOOD = 0x80
 
 
 @dataclass
@@ -629,11 +634,17 @@ def parse_ethernet_frame(data: bytes) -> Optional[RTFrame]:
     if len(data) < 18:  # 14 (eth) + 4 (min RT)
         return None
 
-    parsed_eth = EtherTypeStruct.parse(data[12:14])
+    # RT frames are priority-tagged, including the ones build_ethernet_frame
+    # emits, so the EtherType is not at a fixed offset.
+    eth_offset = skip_vlan_tags(data)
+    if len(data) < eth_offset + 2:
+        return None
+
+    parsed_eth = EtherTypeStruct.parse(data[eth_offset : eth_offset + 2])
     if parsed_eth.ethertype != ETHERTYPE_PROFINET:
         return None
 
     try:
-        return RTFrame.from_bytes(data[14:])
+        return RTFrame.from_bytes(data[eth_offset + 2 :])
     except ValueError:
         return None

@@ -37,7 +37,7 @@ from profinet.rt import (
 from profinet.util import skip_vlan_tags
 
 CTRL_MAC = b"\x00\x11\x22\x33\x44\x55"
-DEV_MAC = b"\xd0\xc8\x57\xe0\x1c\x2c"
+DEV_MAC = b"\x02\x00\x00\x00\x00\x01"
 VLAN_TAG = b"\x81\x00\xc0\x00"  # TPID 0x8100, PCP 6, VID 0
 
 
@@ -173,11 +173,18 @@ class TestCyclicRxConformance:
 # =============================================================================
 
 
-def build_alarm_block(high_priority=False, specifier=0x0400 | 1):
-    """Minimal valid AlarmNotification block (diagnosis alarm, slot 1)."""
+def build_alarm_block(high_priority=False, specifier=0x0400 | 1, items=b""):
+    """Minimal valid AlarmNotification block (diagnosis alarm, slot 1).
+
+    The body is 20 bytes and BlockLength counts everything after the
+    BlockLength field, so an item-less block is 26 bytes and reads 22.
+    Emitting anything else here hides off-by-N cursor bugs in the item parser.
+    """
     body = struct.pack(">HIHHIIH", 0x0001, 0, 1, 1, 0x01, 0x01, specifier)
+    assert len(body) == 20
     block_type = 0x0001 if high_priority else 0x0002
-    return struct.pack(">HHBB", block_type, len(body) + 2, 1, 0) + body + b"\x00\x00"
+    rest = b"\x01\x00" + body + items  # version high/low, body, alarm items
+    return struct.pack(">HH", block_type, len(rest)) + rest
 
 
 def build_rta_frame(
@@ -737,3 +744,151 @@ class TestOutputIocrFrameId:
         block = RPCCon._build_iocr_block(con, IOCR_TYPE_INPUT, 1, IOCRSetup(slots=[]))
         frame_id = struct.unpack(">H", block[18:20])[0]
         assert 0xC000 <= frame_id <= 0xF7FF
+
+
+# =============================================================================
+# AlarmNotification body width (IEC 61158-6-10: body is 20 bytes, not 22)
+# =============================================================================
+
+
+class TestAlarmNotificationBodyWidth:
+    """The PDU body is AlarmType(2) + API(4) + Slot(2) + Subslot(2) +
+    ModuleIdent(4) + SubmoduleIdent(4) + AlarmSpecifier(2) = 20 bytes, so an
+    item-less block is 26 bytes. Advancing 22 pushed the item cursor two bytes
+    past the first item and rejected every item-less alarm."""
+
+    def test_item_less_alarm_is_accepted(self):
+        block = build_alarm_block()
+        assert len(block) == 26
+        notification = parse_alarm_notification(block)
+        assert notification.slot_number == 1
+        assert notification.items == []
+
+    def test_channel_diagnosis_item_is_decoded(self):
+        item = struct.pack(">HHHH", 0x8000, 1, 0x0800, 9)
+        notification = parse_alarm_notification(build_alarm_block(items=item))
+        assert len(notification.items) == 1
+        assert notification.items[0].user_structure_id == 0x8000
+        assert notification.items[0].channel_number == 1
+        assert notification.items[0].channel_error_type == 9
+
+    def test_ethernet_padding_is_not_parsed_as_items(self):
+        """Senders pad to the 60-byte minimum; BlockLength bounds the block."""
+        item = struct.pack(">HHHH", 0x8000, 1, 0x0800, 9)
+        block = build_alarm_block(items=item)
+        padded = parse_alarm_notification(block + b"\x00" * 6)
+        assert len(padded.items) == len(parse_alarm_notification(block).items) == 1
+
+
+# =============================================================================
+# RT frame build/parse round trip over the VLAN tag
+# =============================================================================
+
+
+class TestRtFrameRoundTrip:
+    """build_ethernet_frame always priority-tags, so parse_ethernet_frame must
+    skip the tag instead of reading the EtherType at a fixed offset 12."""
+
+    def _frame(self):
+        return RTFrame(
+            frame_id=0xC001,
+            cycle_counter=42,
+            data_status=RTFrame.DATA_VALID | RTFrame.DATA_RUN,
+            transfer_status=0,
+            payload=b"\xde\xad\xbe\xef" + b"\x00" * 36,
+        )
+
+    def test_tagged_round_trip(self):
+        from profinet.rt import build_ethernet_frame, parse_ethernet_frame
+
+        raw = build_ethernet_frame(DEV_MAC, CTRL_MAC, self._frame())
+        assert raw[12:14] == b"\x81\x00"  # builder emits a tagged frame
+        parsed = parse_ethernet_frame(raw)
+        assert parsed is not None
+        assert parsed.frame_id == 0xC001
+        assert parsed.cycle_counter == 42
+
+    def test_untagged_still_parses(self):
+        from profinet.rt import parse_ethernet_frame
+
+        raw = DEV_MAC + CTRL_MAC + b"\x88\x92" + self._frame().to_bytes()
+        parsed = parse_ethernet_frame(raw)
+        assert parsed is not None
+        assert parsed.frame_id == 0xC001
+
+    def test_non_profinet_ethertype_rejected(self):
+        from profinet.rt import parse_ethernet_frame
+
+        raw = DEV_MAC + CTRL_MAC + b"\x08\x00" + b"\x00" * 46
+        assert parse_ethernet_frame(raw) is None
+
+
+# =============================================================================
+# Received IOPS gates input data
+# =============================================================================
+
+
+class TestReceivedIops:
+    """A device that pulls a module keeps sending the frame with valid
+    DataStatus but marks that submodule's IOPS BAD over stale payload bytes.
+    Delivering those bytes as good data is a safety defect."""
+
+    @staticmethod
+    def _payload(data, iops):
+        return data + bytes([iops]) + b"\x00" * 35
+
+    def test_good_iops_delivers_data(self):
+        ctrl = make_controller()
+        ctrl._process_input_frame(
+            build_input_eth_frame(payload=self._payload(b"\xaa\xbb\xcc\xdd", 0x80))
+        )
+        assert ctrl.get_input_data(1, 1) == b"\xaa\xbb\xcc\xdd"
+        assert ctrl.is_input_good(1, 1)
+        assert ctrl.get_input_status(1, 1) == 0x80
+
+    def test_bad_iops_withholds_stale_data(self):
+        ctrl = make_controller()
+        ctrl._process_input_frame(
+            build_input_eth_frame(payload=self._payload(b"\xaa\xbb\xcc\xdd", 0x80))
+        )
+        ctrl._process_input_frame(
+            build_input_eth_frame(payload=self._payload(b"\xaa\xbb\xcc\xdd", 0x00))
+        )
+        assert ctrl.get_input_data(1, 1) is None
+        assert not ctrl.is_input_good(1, 1)
+        # The raw bytes stay reachable for diagnostics.
+        assert ctrl.get_input_data(1, 1, allow_bad=True) == b"\xaa\xbb\xcc\xdd"
+
+    def test_status_callback_fires_on_transitions_only(self):
+        ctrl = make_controller()
+        events = []
+        ctrl.on_input_status(lambda slot, subslot, iops: events.append((slot, subslot, iops)))
+
+        good = build_input_eth_frame(payload=self._payload(b"\x01\x02\x03\x04", 0x80))
+        bad = build_input_eth_frame(payload=self._payload(b"\x01\x02\x03\x04", 0x00))
+        ctrl._process_input_frame(good)
+        ctrl._process_input_frame(good)  # no transition
+        ctrl._process_input_frame(bad)
+        ctrl._process_input_frame(bad)  # no transition
+        assert events == [(1, 1, 0x80), (1, 1, 0x00)]
+
+    def test_input_callback_skips_bad_data(self):
+        ctrl = make_controller()
+        delivered = []
+        ctrl.on_input(lambda slot, subslot, data: delivered.append(data))
+        ctrl._process_input_frame(
+            build_input_eth_frame(payload=self._payload(b"\x01\x02\x03\x04", 0x80))
+        )
+        ctrl._process_input_frame(
+            build_input_eth_frame(payload=self._payload(b"\x09\x09\x09\x09", 0x00))
+        )
+        assert delivered == [b"\x01\x02\x03\x04"]
+
+    def test_iops_masks_lower_bits(self):
+        """DataState is bit 7; Instance/Extension bits must not break the check."""
+        ctrl = make_controller()
+        ctrl._process_input_frame(
+            build_input_eth_frame(payload=self._payload(b"\x01\x02\x03\x04", 0x81))
+        )
+        assert ctrl.is_input_good(1, 1)
+        assert ctrl.get_input_data(1, 1) == b"\x01\x02\x03\x04"

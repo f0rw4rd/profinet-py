@@ -18,7 +18,7 @@ from profinet.exceptions import RPCError
 CTRL_MAC = b"\x00\x11\x22\x33\x44\x55"
 
 
-def make_info(mac="d0:c8:57:e0:1c:2c"):
+def make_info(mac="02:00:00:00:00:01"):
     return SimpleNamespace(
         name="dev",
         ip="192.168.0.10",
@@ -47,11 +47,11 @@ class TestProperties:
         assert device.ip == "192.168.0.10"
 
     def test_mac_from_string(self):
-        assert make_connected_device().mac == "d0:c8:57:e0:1c:2c"
+        assert make_connected_device().mac == "02:00:00:00:00:01"
 
     def test_mac_from_bytes(self):
-        device = make_connected_device(mac=b"\xd0\xc8\x57\xe0\x1c\x2c")
-        assert device.mac == "d0:c8:57:e0:1c:2c"
+        device = make_connected_device(mac=b"\x02\x00\x00\x00\x00\x01")
+        assert device.mac == "02:00:00:00:00:01"
 
 
 class TestReadWrite:

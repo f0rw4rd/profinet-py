@@ -20,7 +20,7 @@ def make_device():
     info = SimpleNamespace(
         name="dev",
         ip="192.168.0.10",
-        mac="d0:c8:57:e0:1c:2c",
+        mac="02:00:00:00:00:01",
         vendor_id=1,
         device_id=1,
         device_type="test",

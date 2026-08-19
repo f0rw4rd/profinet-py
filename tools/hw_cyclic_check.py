@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
-Hardware test: Cyclic IO with real E-T-A PROFINET device.
+Manual hardware bring-up check: cyclic IO against a real PROFINET device.
 
-This script tests the full cyclic IO flow:
+Not a pytest module. It needs a physical device, raw-socket privileges and a
+dedicated interface, so it lives outside tests/ and is run by hand:
+
+    PROFINET_IFACE=eth0 PROFINET_NAME=my-device python tools/hw_cyclic_check.py
+
+It walks the full cyclic flow:
 1. Discover device via DCP
 2. Connect with IOCR blocks (AR + Input/Output IOCR + ExpectedSubmodule)
 3. Parameter phase (PrmBegin / PrmEnd)
@@ -11,8 +16,8 @@ This script tests the full cyclic IO flow:
 6. Run for a few seconds, log everything
 7. Stop and report
 
-Device: E-T-A at 192.168.1.100, station name "test-eta-device"
-Run on Windows VM with: python test_cyclic_hw.py
+Slot layout and IO sizes below are placeholders: set them to match the GSDML of
+the device under test, or the connect will be rejected.
 """
 
 import logging
@@ -20,17 +25,6 @@ import os
 import sys
 import time
 import traceback
-
-# Setup logging FIRST
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s.%(msecs)03d %(levelname)-5s [%(name)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("cyclic_test")
-
-# Add parent to path for development
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from profinet import (
     IOCRSetup,
@@ -48,11 +42,21 @@ from profinet.rt import (
     IODataObject,
 )
 
-# ---- Configuration ----
-INTERFACE = "Ethernet 3"
-DEVICE_NAME = "test-eta-device"
-DEVICE_IP = "192.168.1.100"
-DEVICE_MAC = "d0:c8:57:e0:1c:2c"
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s.%(msecs)03d %(levelname)-5s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("hw_cyclic_check")
+
+# ---- Configuration (override via environment) ----
+INTERFACE = os.environ.get("PROFINET_IFACE", "eth0")
+DEVICE_NAME = os.environ.get("PROFINET_NAME", "")
+DEVICE_IP = os.environ.get("PROFINET_IP", "")
+DEVICE_MAC = os.environ.get("PROFINET_MAC", "")
+
+if not DEVICE_NAME:
+    sys.exit("Set PROFINET_NAME to the station name of the device under test")
 
 # Use conservative cycle time
 SEND_CLOCK_FACTOR = 32  # 1ms base

@@ -67,7 +67,7 @@ def make_controller(**kwargs):
     defaults = {
         "interface": "eth0",
         "src_mac": b"\x00\x11\x22\x33\x44\x55",
-        "dst_mac": b"\xd0\xc8\x57\xe0\x1c\x2c",
+        "dst_mac": b"\x02\x00\x00\x00\x00\x01",
         "input_iocr": make_input_iocr(),
         "output_iocr": make_output_iocr(),
     }

@@ -3175,7 +3175,7 @@ class RPCCon:
 
                 nrd_args_max = struct.unpack_from(f"{bo}I", nrd_payload, 0)[0]
                 nrd_args_len = struct.unpack_from(f"{bo}I", nrd_payload, 4)[0]
-                struct.unpack_from(f"{bo}I", nrd_payload, 8)[0]  # max_count
+                nrd_max_count = struct.unpack_from(f"{bo}I", nrd_payload, 8)[0]
                 struct.unpack_from(f"{bo}I", nrd_payload, 12)[0]  # offset
                 nrd_actual = struct.unpack_from(f"{bo}I", nrd_payload, 16)[0]
                 nrd_body = nrd_payload[20:]
@@ -3237,7 +3237,7 @@ class RPCCon:
                         f"{bo}IIIII",
                         0,  # pnio_status = OK
                         resp_nrd_len,  # args_length
-                        resp_nrd_len,  # maximum_count
+                        nrd_max_count,  # maximum_count from the request's NDR array
                         0,  # offset
                         resp_nrd_len,  # actual_count
                     )
@@ -3250,7 +3250,7 @@ class RPCCon:
                     "!BB BB 3s B",
                     hdr["version"],
                     PNRPCHeader.RESPONSE,
-                    0x00,  # flags1
+                    0x0A,  # CODESYS/PNIO CControl response flags from the working capture
                     0x00,  # flags2
                     hdr["drep"],
                     hdr["serial_high"],

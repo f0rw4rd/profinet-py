@@ -773,21 +773,21 @@ class TestSetParamNameLengthValidation:
         # Should execute without ValueError
         assert result is False  # Timeout means no response
 
-    def test_set_param_ip_no_length_check(self):
-        """Test set_param for IP param doesn't apply name length check."""
+    def test_set_param_ip_rejected(self):
+        """set_param('ip') is rejected: the IP suite needs 12 binary bytes,
+        which only set_ip() builds; an ASCII value can never be applied."""
         mock_sock = MagicMock()
-        mock_sock.recv.side_effect = TimeoutError()
 
-        # IP address value - should not trigger name length validation
-        result = set_param(
-            mock_sock,
-            b"\x00\x11\x22\x33\x44\x55",
-            "AA:BB:CC:DD:EE:FF",
-            "ip",
-            "192.168.1.100",
-            timeout_sec=1,
-        )
-        assert result is False  # Timeout means no response
+        with pytest.raises(DCPError, match="set_ip"):
+            set_param(
+                mock_sock,
+                b"\x00\x11\x22\x33\x44\x55",
+                "AA:BB:CC:DD:EE:FF",
+                "ip",
+                "192.168.1.100",
+                timeout_sec=1,
+            )
+        mock_sock.send.assert_not_called()
 
 
 # =============================================================================

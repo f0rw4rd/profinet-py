@@ -60,13 +60,16 @@ from .rt import (
     DATA_STATUS_VALID,
     ETHERTYPE_PROFINET,
     IOXS_BAD,
+    IOXS_DATA_STATE_GOOD,
     IOXS_GOOD,
+    VLAN_TAG_RT,
     CyclicDataBuilder,
     EtherTypeStruct,
     IOCRConfig,
     RTFrame,
 )
 from .util import ethernet_socket as _ethernet_socket
+from .util import skip_vlan_tags
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +281,9 @@ class CyclicController:
         self._cycle_counter = 0
         self._output_builder = CyclicDataBuilder(output_iocr)
         self._input_data: Dict[Tuple[int, int], bytes] = {}
+        # Last provider status (IOPS) the device sent per submodule. Payload
+        # bytes are only meaningful while the matching IOPS reports GOOD.
+        self._input_status: Dict[Tuple[int, int], int] = {}
         self._input_lock = threading.Lock()
 
         # Cycle counter tracking for RX
@@ -292,11 +298,18 @@ class CyclicController:
         # Check and warn about cycle time
         self._check_cycle_time()
 
-        # Initialize all IOPS to good
+        # Initialize provider and consumer status to good before the first
+        # transmitted frame. Some IO devices do not start their input provider
+        # until the controller reports that it is consuming input data.
         self._output_builder.set_all_iops(IOXS_GOOD)
+        self._output_builder.set_all_iocs(IOXS_GOOD)
+        # Tracks the watchdog-driven IOCS state so the RX/timeout paths only
+        # rewrite the buffer on transitions (both run on the RX thread).
+        self._iocs_good = True
 
         # Callbacks
         self._on_input_data: Optional[Callable[[int, int, bytes], None]] = None
+        self._on_input_status: Optional[Callable[[int, int, int], None]] = None
         self._on_timeout: Optional[Callable[[], None]] = None
         self._on_error: Optional[Callable[[str], None]] = None
         self._on_state_change: Optional[Callable[[CyclicState, CyclicState], None]] = None
@@ -374,20 +387,59 @@ class CyclicController:
         self._output_builder.set_data(slot, subslot, data)
         self._output_builder.set_iops(slot, subslot, IOXS_GOOD)
 
-    def get_input_data(self, slot: int, subslot: int) -> Optional[bytes]:
+    def get_input_data(self, slot: int, subslot: int, allow_bad: bool = False) -> Optional[bytes]:
         """Get latest input data from device.
 
         Thread-safe - can be called from any thread.
+
+        Data whose IOPS is BAD must not be used by the application: the device
+        is telling us the payload is not valid (module pulled, sensor faulted),
+        and the bytes it keeps sending are stale. Such data is withheld unless
+        allow_bad is set. Use get_input_status() to inspect the raw IOPS.
+
+        Args:
+            slot: Slot number
+            subslot: Subslot number
+            allow_bad: Return the payload even when the device marked IOPS BAD
+
+        Returns:
+            Latest input data bytes, or None if not received or IOPS is BAD
+        """
+        with self._input_lock:
+            if not allow_bad and not self._is_input_good(slot, subslot):
+                return None
+            return self._input_data.get((slot, subslot))
+
+    def get_input_status(self, slot: int, subslot: int) -> Optional[int]:
+        """Get the provider status (IOPS) the device sent for a submodule.
 
         Args:
             slot: Slot number
             subslot: Subslot number
 
         Returns:
-            Latest input data bytes, or None if not received
+            Raw IOPS byte (0x80 = GOOD), or None if nothing received yet
         """
         with self._input_lock:
-            return self._input_data.get((slot, subslot))
+            return self._input_status.get((slot, subslot))
+
+    def is_input_good(self, slot: int, subslot: int) -> bool:
+        """Whether the device currently reports GOOD provider status.
+
+        Args:
+            slot: Slot number
+            subslot: Subslot number
+
+        Returns:
+            True if the last received IOPS for this submodule was GOOD
+        """
+        with self._input_lock:
+            return self._is_input_good(slot, subslot)
+
+    def _is_input_good(self, slot: int, subslot: int) -> bool:
+        """IOPS check without taking the lock. Caller must hold _input_lock."""
+        status = self._input_status.get((slot, subslot))
+        return status is not None and bool(status & IOXS_DATA_STATE_GOOD)
 
     def on_input(self, callback: Callable[[int, int, bytes], None]) -> None:
         """Register callback for input data updates.
@@ -398,6 +450,20 @@ class CyclicController:
             callback: Function(slot, subslot, data) called on input
         """
         self._on_input_data = callback
+
+    def on_input_status(self, callback: Callable[[int, int, int], None]) -> None:
+        """Register callback for provider status (IOPS) changes.
+
+        Invoked from the RX thread whenever a submodule's IOPS transitions
+        between GOOD and BAD, which is how a device signals that its input data
+        has become invalid (module pulled, sensor faulted) without dropping the
+        AR. The frame keeps arriving with stale payload, so this is the only
+        notification the application gets.
+
+        Args:
+            callback: Function(slot, subslot, iops) called on IOPS transitions
+        """
+        self._on_input_status = callback
 
     def on_timeout(self, callback: Callable[[], None]) -> None:
         """Register callback for watchdog timeout.
@@ -441,9 +507,11 @@ class CyclicController:
         self.stats.reset()
         self._last_rx_cycle_counter = None
 
-        # Create separate TX and RX sockets
+        # Create separate TX and RX sockets. The RX socket binds ETH_P_ALL:
+        # a socket bound to 0x8892 never sees VLAN-tagged frames unless the
+        # NIC strips the tag, and devices commonly send priority-tagged RT.
         self._tx_sock = self._create_raw_socket(timeout=None)
-        self._rx_sock = self._create_raw_socket(timeout=0.001)
+        self._rx_sock = self._create_raw_socket(timeout=0.001, ethertype=None)
 
         # Swap initial data into send buffer
         self._output_builder.swap()
@@ -537,11 +605,15 @@ class CyclicController:
     # Socket creation
     # =========================================================================
 
-    def _create_raw_socket(self, timeout: Optional[float] = None):
+    def _create_raw_socket(
+        self, timeout: Optional[float] = None, ethertype: Optional[int] = ETHERTYPE_PROFINET
+    ):
         """Create raw Ethernet socket.
 
         Args:
             timeout: Socket timeout (None for blocking, float for timeout)
+            ethertype: Bind protocol; None binds ETH_P_ALL so VLAN-tagged
+                frames are delivered too
 
         Returns:
             Configured socket
@@ -550,7 +622,7 @@ class CyclicController:
             PermissionError: If raw socket requires root/admin privileges
         """
         try:
-            sock = _ethernet_socket(self.interface, ETHERTYPE_PROFINET)
+            sock = _ethernet_socket(self.interface, ethertype)
         except PermissionError as e:
             raise PermissionError(f"Raw socket requires root/admin privileges: {e}") from e
 
@@ -561,6 +633,18 @@ class CyclicController:
     # =========================================================================
     # TX path
     # =========================================================================
+
+    def _tx_cycle(self) -> None:
+        """Swap the output buffer and transmit one frame.
+
+        Runs every cycle, including in FAULT: if the controller stops
+        sending, the device's Data Hold Timer expires and it aborts the
+        whole AR, so input frames can never resume and FAULT recovery
+        becomes unreachable. IOCS is already BAD in FAULT.
+        """
+        self._output_builder.swap()
+        self._send_output_frame()
+        self.stats.frames_sent += 1
 
     def _tx_loop(self) -> None:
         """Transmit loop - sends output frames at cycle rate."""
@@ -575,12 +659,7 @@ class CyclicController:
             now = time.perf_counter()
 
             if now >= next_send:
-                # In FAULT state, don't send output frames
-                if self._state != CyclicState.FAULT:
-                    # Swap double buffer and send
-                    self._output_builder.swap()
-                    self._send_output_frame()
-                    self.stats.frames_sent += 1
+                self._tx_cycle()
 
                 if first_frame:
                     first_frame = False
@@ -644,7 +723,9 @@ class CyclicController:
         )
 
         # Build Ethernet frame
-        eth_frame = self.dst_mac + self.src_mac + _ETHERTYPE_PROFINET_BYTES + frame.to_bytes()
+        eth_frame = (
+            self.dst_mac + self.src_mac + VLAN_TAG_RT + _ETHERTYPE_PROFINET_BYTES + frame.to_bytes()
+        )
 
         try:
             self._tx_sock.send(eth_frame)
@@ -726,8 +807,13 @@ class CyclicController:
         self.stats.frames_missed += 1
         self.stats.consecutive_timeouts += 1
 
-        # Set IOCS to BAD - we haven't received valid input
-        self._output_builder.set_all_iocs(IOXS_BAD)
+        # Set IOCS to BAD only when watchdog faulting is enabled. With
+        # max_consecutive_timeouts=0 the watchdog is monitoring-only; keep
+        # consumer status GOOD so transient RX gaps do not make the device drop
+        # an otherwise active output relationship.
+        if self.max_consecutive_timeouts > 0 and self._iocs_good:
+            self._output_builder.set_all_iocs(IOXS_BAD)
+            self._iocs_good = False
 
         if self._on_timeout:
             try:
@@ -761,9 +847,10 @@ class CyclicController:
         if len(data) < 18:
             return
 
-        # Parse Ethernet header
+        # Parse Ethernet header; devices may send 802.1Q priority-tagged frames
         src_mac = data[6:12]
-        ethertype = EtherTypeStruct.parse(data[12:14]).ethertype
+        eth_offset = skip_vlan_tags(data)
+        ethertype = EtherTypeStruct.parse(data[eth_offset : eth_offset + 2]).ethertype
 
         if ethertype != ETHERTYPE_PROFINET:
             return
@@ -773,7 +860,7 @@ class CyclicController:
             return
 
         try:
-            frame = RTFrame.from_bytes(data[14:])
+            frame = RTFrame.from_bytes(data[eth_offset + 2 :])
         except ValueError:
             return
 
@@ -794,26 +881,66 @@ class CyclicController:
         # Cycle counter tracking
         self._track_cycle_counter(frame.cycle_counter)
 
-        # Check validity
-        if not frame.is_valid:
+        # Check validity. TransferStatus != 0 means the provider flagged a
+        # transfer problem; conformant consumers discard such frames.
+        if not frame.is_valid or frame.transfer_status != 0:
             self.stats.frames_invalid += 1
             return
 
-        # Set IOCS to GOOD - we received valid input data
-        self._output_builder.set_all_iocs(IOXS_GOOD)
+        # Set IOCS to GOOD - we received valid input data. Only rewrite the
+        # buffer on a BAD->GOOD transition; set_all_iocs dirties the whole
+        # send buffer and this runs for every received frame.
+        if not self._iocs_good:
+            self._output_builder.set_all_iocs(IOXS_GOOD)
+            self._iocs_good = True
 
-        # Extract data per IO object
+        # Extract data per IO object. Each submodule's payload is followed by
+        # its IOPS byte; the device sets it BAD to disown the data it is still
+        # sending, so the payload is only usable while IOPS reports GOOD.
+        status_events = []
+        data_events = []
         with self._input_lock:
             for obj in self.input_iocr.objects:
-                if obj.frame_offset + obj.data_length <= len(frame.payload):
-                    obj_data = frame.payload[obj.frame_offset : obj.frame_offset + obj.data_length]
-                    self._input_data[(obj.slot, obj.subslot)] = obj_data
+                if obj.iops_offset >= len(frame.payload):
+                    continue
+                if obj.frame_offset + obj.data_length > len(frame.payload):
+                    continue
 
-                    if self._on_input_data:
-                        try:
-                            self._on_input_data(obj.slot, obj.subslot, obj_data)
-                        except Exception as e:
-                            logger.error(f"Input callback error: {e}")
+                iops = frame.payload[obj.iops_offset]
+                key = (obj.slot, obj.subslot)
+                was_good = self._is_input_good(obj.slot, obj.subslot)
+                is_good = bool(iops & IOXS_DATA_STATE_GOOD)
+
+                self._input_status[key] = iops
+                self._input_data[key] = frame.payload[
+                    obj.frame_offset : obj.frame_offset + obj.data_length
+                ]
+
+                if is_good != was_good:
+                    status_events.append((obj.slot, obj.subslot, iops))
+                if is_good:
+                    data_events.append((obj.slot, obj.subslot, self._input_data[key]))
+
+        # Callbacks run outside the lock: they are application code and must not
+        # be able to stall the RX thread's next frame while holding it.
+        for slot, subslot, iops in status_events:
+            if not iops & IOXS_DATA_STATE_GOOD:
+                logger.warning(
+                    f"Slot {slot}/{subslot}: device reports IOPS BAD (0x{iops:02X}), "
+                    f"input data is no longer valid"
+                )
+            if self._on_input_status:
+                try:
+                    self._on_input_status(slot, subslot, iops)
+                except Exception as e:
+                    logger.error(f"Input status callback error: {e}")
+
+        if self._on_input_data:
+            for slot, subslot, obj_data in data_events:
+                try:
+                    self._on_input_data(slot, subslot, obj_data)
+                except Exception as e:
+                    logger.error(f"Input callback error: {e}")
 
     def _track_cycle_counter(self, rx_counter: int) -> None:
         """Track received cycle counter for gap/duplicate detection.

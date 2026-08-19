@@ -17,7 +17,7 @@ class TestAlarmEndpoint:
             interface="eth0",
             controller_ref=1,
             device_ref=42,
-            device_mac=b"\xd0\xc8\x57\xe0\x1c\x2c",
+            device_mac=b"\x02\x00\x00\x00\x00\x01",
         )
         assert endpoint.transport == 0
 

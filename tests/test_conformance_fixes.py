@@ -1,0 +1,894 @@
+"""Regression tests for conformance fixes found by cross-checking against
+the p-net certified device stack and the Wireshark PROFINET dissectors.
+
+Covers:
+- VLAN tag handling on RX (cyclic + alarms)
+- RTA transport-acknowledge handshake (TACK, sequence numbers, PDU dispatch)
+- Cyclic TX behavior in FAULT and TransferStatus validation
+- DCP Set wire format (odd-length padding, BlockQualifier, Signal)
+- NDR ArgsMaximum sizing
+- Output IOCR frame ID convention (0xFFFF, device assigns)
+"""
+
+import struct
+from unittest.mock import MagicMock
+
+import pytest
+
+from profinet.alarm_listener import (
+    ADD_FLAGS_TACK,
+    ADD_FLAGS_WINDOW_1,
+    AlarmEndpoint,
+    AlarmListener,
+)
+from profinet.alarms import parse_alarm_notification
+from profinet.cyclic import CyclicController, CyclicState
+from profinet.dcp import set_param, signal_device
+from profinet.exceptions import DCPError
+from profinet.protocol import PNRTAHeader
+from profinet.rpc import NDR_ARGS_MAXIMUM, RPCCon
+from profinet.rt import (
+    IOCR_TYPE_INPUT,
+    IOCR_TYPE_OUTPUT,
+    IOCRConfig,
+    IODataObject,
+    RTFrame,
+)
+from profinet.util import skip_vlan_tags
+
+CTRL_MAC = b"\x00\x11\x22\x33\x44\x55"
+DEV_MAC = b"\x02\x00\x00\x00\x00\x01"
+VLAN_TAG = b"\x81\x00\xc0\x00"  # TPID 0x8100, PCP 6, VID 0
+
+
+# =============================================================================
+# util.skip_vlan_tags
+# =============================================================================
+
+
+class TestSkipVlanTags:
+    def test_untagged(self):
+        frame = DEV_MAC + CTRL_MAC + b"\x88\x92" + b"\x00" * 50
+        assert skip_vlan_tags(frame) == 12
+
+    def test_single_8021q_tag(self):
+        frame = DEV_MAC + CTRL_MAC + VLAN_TAG + b"\x88\x92" + b"\x00" * 50
+        assert skip_vlan_tags(frame) == 16
+
+    def test_double_tag_qinq(self):
+        frame = DEV_MAC + CTRL_MAC + b"\x88\xa8\x00\x00" + VLAN_TAG + b"\x88\x92" + b"\x00" * 50
+        assert skip_vlan_tags(frame) == 20
+
+    def test_short_frame(self):
+        assert skip_vlan_tags(b"\x00" * 13) == 12
+
+
+# =============================================================================
+# Cyclic RX: VLAN tags, TransferStatus, FAULT TX
+# =============================================================================
+
+
+def make_input_iocr():
+    return IOCRConfig(
+        iocr_type=IOCR_TYPE_INPUT,
+        iocr_reference=1,
+        frame_id=0xC001,
+        send_clock_factor=1,
+        reduction_ratio=1,
+        watchdog_factor=3,
+        data_length=40,
+        objects=[IODataObject(slot=1, subslot=1, frame_offset=0, data_length=4, iops_offset=4)],
+    )
+
+
+def make_output_iocr():
+    return IOCRConfig(
+        iocr_type=IOCR_TYPE_OUTPUT,
+        iocr_reference=2,
+        frame_id=0xC000,
+        send_clock_factor=32,
+        reduction_ratio=32,
+        watchdog_factor=3,
+        data_length=40,
+        objects=[IODataObject(slot=1, subslot=1, frame_offset=0, data_length=4, iops_offset=4)],
+    )
+
+
+def make_controller():
+    return CyclicController(
+        interface="eth0",
+        src_mac=CTRL_MAC,
+        dst_mac=DEV_MAC,
+        input_iocr=make_input_iocr(),
+        output_iocr=make_output_iocr(),
+    )
+
+
+def build_input_eth_frame(vlan=False, transfer_status=0, payload=None):
+    """Device -> controller cyclic frame for the input IOCR (0xC001)."""
+    if payload is None:
+        payload = b"\xaa\xbb\xcc\xdd" + b"\x80" + b"\x00" * 35  # data + IOPS GOOD + pad
+    rt = RTFrame(
+        frame_id=0xC001,
+        cycle_counter=1,
+        data_status=RTFrame.DATA_VALID | RTFrame.DATA_RUN,
+        transfer_status=transfer_status,
+        payload=payload,
+    )
+    tag = VLAN_TAG if vlan else b""
+    return CTRL_MAC + DEV_MAC + tag + b"\x88\x92" + rt.to_bytes()
+
+
+class TestCyclicRxConformance:
+    def test_untagged_input_frame_accepted(self):
+        ctrl = make_controller()
+        ctrl._state = CyclicState.RUNNING
+        ctrl._process_input_frame(build_input_eth_frame(vlan=False))
+        assert ctrl.stats.frames_received == 1
+        assert ctrl.get_input_data(1, 1) == b"\xaa\xbb\xcc\xdd"
+
+    def test_vlan_tagged_input_frame_accepted(self):
+        ctrl = make_controller()
+        ctrl._state = CyclicState.RUNNING
+        ctrl._process_input_frame(build_input_eth_frame(vlan=True))
+        assert ctrl.stats.frames_received == 1
+        assert ctrl.get_input_data(1, 1) == b"\xaa\xbb\xcc\xdd"
+
+    def test_nonzero_transfer_status_dropped(self):
+        ctrl = make_controller()
+        ctrl._state = CyclicState.RUNNING
+        ctrl._process_input_frame(build_input_eth_frame(transfer_status=1))
+        assert ctrl.stats.frames_invalid == 1
+        assert ctrl.get_input_data(1, 1) is None
+
+    def test_tx_continues_in_fault(self):
+        """A controller that stops sending makes the device's DHT expire
+        and abort the AR, so FAULT must not stop the TX path."""
+        ctrl = make_controller()
+        ctrl._state = CyclicState.FAULT
+        ctrl._send_output_frame = MagicMock()
+        ctrl._tx_cycle()
+        ctrl._send_output_frame.assert_called_once()
+        assert ctrl.stats.frames_sent == 1
+
+    def test_rx_socket_binds_all_protocols(self, monkeypatch):
+        """RX must bind ETH_P_ALL: a 0x8892-bound socket never sees
+        VLAN-tagged frames unless the NIC strips the tag."""
+        import profinet.cyclic as cyclic_mod
+
+        captured = {}
+
+        def fake_socket(interface, ethertype):
+            captured["ethertype"] = ethertype
+            return MagicMock()
+
+        monkeypatch.setattr(cyclic_mod, "_ethernet_socket", fake_socket)
+        ctrl = make_controller()
+        ctrl._create_raw_socket(timeout=0.001, ethertype=None)
+        assert captured["ethertype"] is None
+
+
+# =============================================================================
+# Alarm listener: RTA transport-acknowledge handshake
+# =============================================================================
+
+
+def build_alarm_block(high_priority=False, specifier=0x0400 | 1, items=b""):
+    """Minimal valid AlarmNotification block (diagnosis alarm, slot 1).
+
+    The body is 20 bytes and BlockLength counts everything after the
+    BlockLength field, so an item-less block is 26 bytes and reads 22.
+    Emitting anything else here hides off-by-N cursor bugs in the item parser.
+    """
+    body = struct.pack(">HIHHIIH", 0x0001, 0, 1, 1, 0x01, 0x01, specifier)
+    assert len(body) == 20
+    block_type = 0x0001 if high_priority else 0x0002
+    rest = b"\x01\x00" + body + items  # version high/low, body, alarm items
+    return struct.pack(">HH", block_type, len(rest)) + rest
+
+
+def build_rta_frame(
+    pdu_type,
+    add_flags,
+    send_seq,
+    ack_seq,
+    var_part=b"",
+    dst_ref=1,
+    src_ref=42,
+    version=1,
+    vlan=False,
+    frame_id=0xFE01,
+):
+    """Device -> controller RTA PDU as a raw Ethernet frame."""
+    rta = struct.pack(
+        ">HHBBHHH",
+        dst_ref,
+        src_ref,
+        (version << 4) | pdu_type,
+        add_flags,
+        send_seq,
+        ack_seq,
+        len(var_part),
+    )
+    tag = VLAN_TAG if vlan else b""
+    return CTRL_MAC + DEV_MAC + tag + b"\x88\x92" + struct.pack(">H", frame_id) + rta + var_part
+
+
+def parse_sent_rta(frame):
+    """Parse a frame our listener sent: returns (frame_id, rta fields, var_part)."""
+    assert frame[0:6] == DEV_MAC
+    assert frame[6:12] == CTRL_MAC
+    # TX frames must be 802.1Q priority-tagged (PCP 6 high / 5 low, VID 0)
+    assert frame[12:14] == b"\x81\x00"
+    tci = struct.unpack(">H", frame[14:16])[0]
+    assert tci in (0xC000, 0xA000)
+    assert frame[16:18] == b"\x88\x92"
+    frame_id = struct.unpack(">H", frame[18:20])[0]
+    # High-prio alarms carry PCP 6, low-prio PCP 5
+    assert tci == (0xC000 if frame_id == 0xFC01 else 0xA000)
+    dst_ref, src_ref, pdu_type, add_flags, send_seq, ack_seq, var_len = struct.unpack(
+        ">HHBBHHH", frame[20:32]
+    )
+    var_part = frame[32:]
+    assert var_len == len(var_part)
+    return {
+        "frame_id": frame_id,
+        "dst_ref": dst_ref,
+        "src_ref": src_ref,
+        "pdu_type": pdu_type,
+        "add_flags": add_flags,
+        "send_seq": send_seq,
+        "ack_seq": ack_seq,
+        "var_part": var_part,
+    }
+
+
+def make_listener():
+    endpoint = AlarmEndpoint(interface="eth0", controller_ref=1, device_ref=42, device_mac=DEV_MAC)
+    listener = AlarmListener(endpoint, controller_mac=CTRL_MAC)
+    listener._sock = MagicMock()
+    return listener
+
+
+def feed(listener, frame):
+    listener._sock.recv.return_value = frame
+    listener._handle_layer2_frame()
+
+
+def sent_frames(listener):
+    return [parse_sent_rta(c.args[0]) for c in listener._sock.send.call_args_list]
+
+
+class TestRTAHandshake:
+    def test_notification_gets_transport_ack_then_alarm_ack(self):
+        listener = make_listener()
+        alarms = []
+        listener.add_callback(alarms.append)
+
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_DATA,
+                ADD_FLAGS_WINDOW_1 | ADD_FLAGS_TACK,
+                send_seq=0xFFFF,
+                ack_seq=0xFFFE,
+                var_part=build_alarm_block(),
+            ),
+        )
+
+        sent = sent_frames(listener)
+        assert len(sent) == 2
+
+        # 1st frame: pure transport ACK (TACK) with empty var part
+        tack = sent[0]
+        assert tack["pdu_type"] == 0x13  # version 1 high nibble, ACK low nibble
+        assert tack["add_flags"] == ADD_FLAGS_WINDOW_1  # window size 1, no TACK bit
+        assert tack["send_seq"] == 0xFFFE
+        assert tack["ack_seq"] == 0xFFFF  # echoes the device's SendSeqNum
+        assert tack["var_part"] == b""
+        assert tack["dst_ref"] == 42 and tack["src_ref"] == 1
+
+        # 2nd frame: application AlarmAck as DATA with TACK requested
+        ack = sent[1]
+        assert ack["pdu_type"] == 0x11
+        assert ack["add_flags"] == ADD_FLAGS_WINDOW_1 | ADD_FLAGS_TACK
+        assert ack["send_seq"] == 0xFFFF  # first DATA uses initial counter
+        assert ack["ack_seq"] == 0xFFFF
+        assert struct.unpack(">H", ack["var_part"][0:2])[0] == 0x8002  # AlarmAck Low
+
+        # Receive counters advanced (0xFFFF accepted, next expected is 0)
+        assert listener._exp_seq_num == 0x0000
+        assert listener._exp_seq_num_o == 0xFFFF
+        assert len(alarms) == 1
+
+    def test_duplicate_notification_is_reacked_not_reprocessed(self):
+        listener = make_listener()
+        alarms = []
+        listener.add_callback(alarms.append)
+        frame = build_rta_frame(
+            PNRTAHeader.RTA_TYPE_DATA,
+            ADD_FLAGS_WINDOW_1 | ADD_FLAGS_TACK,
+            send_seq=0xFFFF,
+            ack_seq=0xFFFE,
+            var_part=build_alarm_block(),
+        )
+        feed(listener, frame)
+        listener._sock.send.reset_mock()
+
+        feed(listener, frame)  # retransmission of the same PDU
+
+        sent = sent_frames(listener)
+        assert len(sent) == 1
+        assert sent[0]["pdu_type"] == 0x13  # ACK only, nothing reprocessed
+        assert len(alarms) == 1
+
+    def test_out_of_sequence_notification_gets_nack(self):
+        listener = make_listener()
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_DATA,
+                ADD_FLAGS_WINDOW_1 | ADD_FLAGS_TACK,
+                send_seq=5,
+                ack_seq=0xFFFE,
+                var_part=build_alarm_block(),
+            ),
+        )
+        sent = sent_frames(listener)
+        assert len(sent) == 1
+        assert sent[0]["pdu_type"] == 0x12  # NACK
+        assert listener._exp_seq_num == 0xFFFF  # unchanged
+
+    def test_data_without_tack_is_ignored(self):
+        listener = make_listener()
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_DATA,
+                ADD_FLAGS_WINDOW_1,
+                send_seq=0xFFFF,
+                ack_seq=0xFFFE,
+                var_part=build_alarm_block(),
+            ),
+        )
+        listener._sock.send.assert_not_called()
+
+    def test_pure_ack_advances_send_counter(self):
+        listener = make_listener()
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_ACK, ADD_FLAGS_WINDOW_1, send_seq=0xFFFE, ack_seq=0xFFFF
+            ),
+        )
+        assert listener._send_seq_num == 0x0000
+        assert listener._send_seq_num_o == 0xFFFF
+        listener._sock.send.assert_not_called()
+
+    def test_stale_ack_does_not_advance(self):
+        listener = make_listener()
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_ACK, ADD_FLAGS_WINDOW_1, send_seq=0xFFFE, ack_seq=5
+            ),
+        )
+        assert listener._send_seq_num == 0xFFFF
+
+    def test_err_pdu_logged_not_acked(self):
+        listener = make_listener()
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_ERR,
+                ADD_FLAGS_WINDOW_1,
+                send_seq=0xFFFE,
+                ack_seq=0xFFFE,
+                var_part=b"\xcf\x81\xfd\x05",
+            ),
+        )
+        listener._sock.send.assert_not_called()
+
+    def test_wrong_version_ignored(self):
+        listener = make_listener()
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_DATA,
+                ADD_FLAGS_WINDOW_1 | ADD_FLAGS_TACK,
+                send_seq=0xFFFF,
+                ack_seq=0xFFFE,
+                var_part=build_alarm_block(),
+                version=2,
+            ),
+        )
+        listener._sock.send.assert_not_called()
+
+    def test_wrong_dst_ref_ignored(self):
+        listener = make_listener()
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_DATA,
+                ADD_FLAGS_WINDOW_1 | ADD_FLAGS_TACK,
+                send_seq=0xFFFF,
+                ack_seq=0xFFFE,
+                var_part=build_alarm_block(),
+                dst_ref=99,
+            ),
+        )
+        listener._sock.send.assert_not_called()
+
+    def test_vlan_tagged_alarm_frame_processed(self):
+        listener = make_listener()
+        alarms = []
+        listener.add_callback(alarms.append)
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_DATA,
+                ADD_FLAGS_WINDOW_1 | ADD_FLAGS_TACK,
+                send_seq=0xFFFF,
+                ack_seq=0xFFFE,
+                var_part=build_alarm_block(),
+                vlan=True,
+            ),
+        )
+        assert len(alarms) == 1
+        assert len(sent_frames(listener)) == 2
+
+    def test_high_priority_uses_high_frame_id(self):
+        listener = make_listener()
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_DATA,
+                ADD_FLAGS_WINDOW_1 | ADD_FLAGS_TACK,
+                send_seq=0xFFFF,
+                ack_seq=0xFFFE,
+                var_part=build_alarm_block(high_priority=True),
+                frame_id=0xFC01,
+            ),
+        )
+        sent = sent_frames(listener)
+        assert len(sent) == 2
+        assert all(f["frame_id"] == 0xFC01 for f in sent)
+        assert struct.unpack(">H", sent[1]["var_part"][0:2])[0] == 0x8001  # AlarmAck High
+
+
+class TestRTAIntegration:
+    """Full multi-alarm exchange against a simulated device."""
+
+    def test_two_alarm_exchange_with_acks(self):
+        listener = make_listener()
+        alarms = []
+        listener.add_callback(alarms.append)
+
+        # Alarm 1: device DATA seq 0xFFFF
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_DATA,
+                ADD_FLAGS_WINDOW_1 | ADD_FLAGS_TACK,
+                send_seq=0xFFFF,
+                ack_seq=0xFFFE,
+                var_part=build_alarm_block(),
+            ),
+        )
+        # Device transport-acks our AlarmAck (seq 0xFFFF)
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_ACK, ADD_FLAGS_WINDOW_1, send_seq=0xFFFF, ack_seq=0xFFFF
+            ),
+        )
+        assert listener._send_seq_num == 0x0000
+
+        listener._sock.send.reset_mock()
+
+        # Alarm 2: device DATA seq 0x0000
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_DATA,
+                ADD_FLAGS_WINDOW_1 | ADD_FLAGS_TACK,
+                send_seq=0x0000,
+                ack_seq=0x0000,
+                var_part=build_alarm_block(),
+            ),
+        )
+
+        sent = sent_frames(listener)
+        assert len(sent) == 2
+        assert sent[0]["pdu_type"] == 0x13
+        assert sent[0]["ack_seq"] == 0x0000
+        assert sent[1]["pdu_type"] == 0x11
+        # ack_seq 0x0000 in the DATA piggybacked our pending seq: advanced
+        assert sent[1]["send_seq"] == 0x0001
+        assert len(alarms) == 2
+        assert listener._exp_seq_num == 0x0001
+
+    def test_seq_wrap_at_0x7fff(self):
+        listener = make_listener()
+        listener._exp_seq_num = 0x7FFF
+        listener._exp_seq_num_o = 0x7FFE
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_DATA,
+                ADD_FLAGS_WINDOW_1 | ADD_FLAGS_TACK,
+                send_seq=0x7FFF,
+                ack_seq=0xFFFE,
+                var_part=build_alarm_block(),
+            ),
+        )
+        assert listener._exp_seq_num == 0x0000  # wraps modulo 0x8000
+
+
+class TestAlarmAckRetransmission:
+    def _receive_alarm(self, listener):
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_DATA,
+                ADD_FLAGS_WINDOW_1 | ADD_FLAGS_TACK,
+                send_seq=0xFFFF,
+                ack_seq=0xFFFE,
+                var_part=build_alarm_block(),
+            ),
+        )
+
+    def test_alarm_ack_sets_pending_retransmit(self):
+        listener = make_listener()
+        self._receive_alarm(listener)
+        assert listener._pending_ack is not None
+        frame, _, retries = listener._pending_ack
+        assert retries == listener.endpoint.rta_retries
+        # Pending frame is the AlarmAck DATA PDU we sent
+        assert parse_sent_rta(frame)["pdu_type"] == 0x11
+
+    def test_retransmits_when_overdue(self):
+        listener = make_listener()
+        self._receive_alarm(listener)
+        listener._sock.send.reset_mock()
+        listener._pending_ack[1] = 0  # force overdue
+        listener._check_retransmit()
+        listener._sock.send.assert_called_once()
+        assert listener._pending_ack[2] == listener.endpoint.rta_retries - 1
+
+    def test_gives_up_after_retries_exhausted(self):
+        listener = make_listener()
+        self._receive_alarm(listener)
+        listener._sock.send.reset_mock()
+        for _ in range(listener.endpoint.rta_retries + 1):
+            listener._pending_ack[1] = 0
+            listener._check_retransmit()
+        assert listener._pending_ack is None
+        assert listener._sock.send.call_count == listener.endpoint.rta_retries
+
+    def test_not_retransmitted_before_timeout(self):
+        listener = make_listener()
+        self._receive_alarm(listener)
+        listener._sock.send.reset_mock()
+        listener._check_retransmit()  # next_time still in the future
+        listener._sock.send.assert_not_called()
+
+    def test_transport_ack_clears_pending(self):
+        listener = make_listener()
+        self._receive_alarm(listener)
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_ACK, ADD_FLAGS_WINDOW_1, send_seq=0xFFFF, ack_seq=0xFFFF
+            ),
+        )
+        assert listener._pending_ack is None
+
+
+class TestCyclicTxVlanTag:
+    def test_output_frame_is_priority_tagged(self):
+        ctrl = make_controller()
+        ctrl._tx_sock = MagicMock()
+        ctrl._send_output_frame()
+        frame = ctrl._tx_sock.send.call_args.args[0]
+        assert frame[0:6] == DEV_MAC
+        assert frame[6:12] == CTRL_MAC
+        assert frame[12:16] == b"\x81\x00\xc0\x00"  # PCP 6, VID 0
+        assert frame[16:18] == b"\x88\x92"
+
+
+class TestReadImplicitWiring:
+    def test_device_read_falls_back_to_implicit(self):
+        from unittest.mock import patch
+
+        from profinet.device import ProfinetDevice
+        from profinet.exceptions import RPCConnectionError
+
+        info = type("Info", (), {"name": "dev", "ip": "1.2.3.4", "mac": "aa:bb:cc:dd:ee:ff"})()
+        device = ProfinetDevice(info, "eth0", CTRL_MAC)
+        with patch.object(ProfinetDevice, "connect", side_effect=RPCConnectionError("rejected")):
+            with patch.object(ProfinetDevice, "read_implicit", return_value=b"\x99") as implicit:
+                assert device.read(0, 1, 0xAFF0) == b"\x99"
+        implicit.assert_called_once_with(0, 1, 0xAFF0, api=0)
+
+    def test_device_read_implicit_uses_fresh_rpc_when_disconnected(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from profinet.device import ProfinetDevice
+
+        info = type("Info", (), {"name": "dev", "ip": "1.2.3.4", "mac": "aa:bb:cc:dd:ee:ff"})()
+        device = ProfinetDevice(info, "eth0", CTRL_MAC)
+        rpc = MagicMock()
+        rpc.read_implicit.return_value = SimpleNamespace(payload=b"\x42")
+        with patch("profinet.device.RPCCon", return_value=rpc):
+            assert device.read_implicit(0, 1, 0xAFF0) == b"\x42"
+        rpc.read_implicit.assert_called_once_with(0, 0, 1, 0xAFF0)
+        rpc.close.assert_called_once()
+
+
+class TestAlarmSpecifierBits:
+    def test_ar_diagnosis_is_bit15(self):
+        alarm = parse_alarm_notification(build_alarm_block(specifier=0x8000 | 1))
+        assert alarm.ar_diagnosis_state is True
+
+    def test_reserved_bit14_not_ar_diagnosis(self):
+        alarm = parse_alarm_notification(build_alarm_block(specifier=0x4000 | 1))
+        assert alarm.ar_diagnosis_state is False
+
+
+# =============================================================================
+# DCP wire format
+# =============================================================================
+
+DCP_PAYLOAD_OFFSET = 26  # eth(14) + frame_id(2) + svc(2) + xid(4) + delay(2) + len(2)
+
+
+def captured_dcp(mock_sock):
+    frame = mock_sock.send.call_args.args[0]
+    dcp_length = struct.unpack(">H", frame[24:26])[0]
+    return frame, dcp_length, frame[DCP_PAYLOAD_OFFSET:]
+
+
+class TestDCPSetWireFormat:
+    def _set_name(self, name, permanent=False):
+        sock = MagicMock()
+        sock.recv.side_effect = TimeoutError()
+        set_param(
+            sock,
+            CTRL_MAC,
+            "AA:BB:CC:DD:EE:FF",
+            "name",
+            name,
+            timeout_sec=1,
+            permanent=permanent,
+        )
+        return captured_dcp(sock)
+
+    def test_odd_length_name_padded_and_counted(self):
+        frame, dcp_length, payload = self._set_name("abc")
+        # block header(4) + qualifier(2) + name(3) + pad(1)
+        assert dcp_length == 10
+        assert len(payload) == dcp_length  # pad byte actually on the wire
+        assert payload[-1] == 0x00
+        block_length = struct.unpack(">H", payload[2:4])[0]
+        assert block_length == 5  # qualifier + name, without padding
+
+    def test_even_length_name_not_padded(self):
+        frame, dcp_length, payload = self._set_name("abcd")
+        assert dcp_length == 10
+        assert len(payload) == dcp_length
+
+    def test_temporary_qualifier_default(self):
+        _, _, payload = self._set_name("abcd")
+        assert payload[4:6] == b"\x00\x00"
+
+    def test_permanent_qualifier(self):
+        _, _, payload = self._set_name("abcd", permanent=True)
+        assert payload[4:6] == b"\x00\x01"
+
+    def test_set_param_ip_rejected(self):
+        sock = MagicMock()
+        with pytest.raises(DCPError, match="set_ip"):
+            set_param(sock, CTRL_MAC, "AA:BB:CC:DD:EE:FF", "ip", "192.168.0.1")
+        sock.send.assert_not_called()
+
+
+class TestDCPSignalWireFormat:
+    def test_signal_is_flash_once(self):
+        sock = MagicMock()
+        sock.recv.side_effect = TimeoutError()
+        signal_device(sock, CTRL_MAC, "AA:BB:CC:DD:EE:FF", timeout_sec=1)
+        _, dcp_length, payload = captured_dcp(sock)
+        assert dcp_length == 8  # block header(4) + qualifier(2) + signal value(2)
+        # BlockQualifier 0x0000, SignalValue 0x0100 ("flash once")
+        assert payload[4:8] == b"\x00\x00\x01\x00"
+
+
+# =============================================================================
+# RPC: NDR ArgsMaximum and output IOCR frame ID
+# =============================================================================
+
+
+class TestNdrArgsMaximum:
+    def _nrd(self, payload):
+        return RPCCon._create_nrd(object.__new__(RPCCon), payload)
+
+    def test_floor_covers_read_responses(self):
+        nrd = self._nrd(b"x" * 100)
+        assert nrd.args_maximum_status == NDR_ARGS_MAXIMUM
+        assert nrd.maximum_count == NDR_ARGS_MAXIMUM
+
+    def test_grows_with_large_requests(self):
+        payload = b"x" * 6000
+        nrd = self._nrd(payload)
+        assert nrd.args_maximum_status >= len(payload)
+        assert nrd.maximum_count >= nrd.args_length
+
+
+class TestOutputIocrFrameId:
+    def test_output_frame_id_is_device_assigned(self):
+        from profinet.rpc import IOCRSetup
+
+        con = object.__new__(RPCCon)
+        block = RPCCon._build_iocr_block(con, IOCR_TYPE_OUTPUT, 2, IOCRSetup(slots=[]))
+        # FrameID field follows block header(6) + type(2) + ref(2) + lt(2) +
+        # properties(4) + data_length(2)
+        frame_id = struct.unpack(">H", block[18:20])[0]
+        assert frame_id == 0xFFFF
+
+    def test_input_frame_id_in_rtc1_range(self):
+        from profinet.rpc import IOCRSetup
+
+        con = object.__new__(RPCCon)
+        block = RPCCon._build_iocr_block(con, IOCR_TYPE_INPUT, 1, IOCRSetup(slots=[]))
+        frame_id = struct.unpack(">H", block[18:20])[0]
+        assert 0xC000 <= frame_id <= 0xF7FF
+
+
+# =============================================================================
+# AlarmNotification body width (IEC 61158-6-10: body is 20 bytes, not 22)
+# =============================================================================
+
+
+class TestAlarmNotificationBodyWidth:
+    """The PDU body is AlarmType(2) + API(4) + Slot(2) + Subslot(2) +
+    ModuleIdent(4) + SubmoduleIdent(4) + AlarmSpecifier(2) = 20 bytes, so an
+    item-less block is 26 bytes. Advancing 22 pushed the item cursor two bytes
+    past the first item and rejected every item-less alarm."""
+
+    def test_item_less_alarm_is_accepted(self):
+        block = build_alarm_block()
+        assert len(block) == 26
+        notification = parse_alarm_notification(block)
+        assert notification.slot_number == 1
+        assert notification.items == []
+
+    def test_channel_diagnosis_item_is_decoded(self):
+        item = struct.pack(">HHHH", 0x8000, 1, 0x0800, 9)
+        notification = parse_alarm_notification(build_alarm_block(items=item))
+        assert len(notification.items) == 1
+        assert notification.items[0].user_structure_id == 0x8000
+        assert notification.items[0].channel_number == 1
+        assert notification.items[0].channel_error_type == 9
+
+    def test_ethernet_padding_is_not_parsed_as_items(self):
+        """Senders pad to the 60-byte minimum; BlockLength bounds the block."""
+        item = struct.pack(">HHHH", 0x8000, 1, 0x0800, 9)
+        block = build_alarm_block(items=item)
+        padded = parse_alarm_notification(block + b"\x00" * 6)
+        assert len(padded.items) == len(parse_alarm_notification(block).items) == 1
+
+
+# =============================================================================
+# RT frame build/parse round trip over the VLAN tag
+# =============================================================================
+
+
+class TestRtFrameRoundTrip:
+    """build_ethernet_frame always priority-tags, so parse_ethernet_frame must
+    skip the tag instead of reading the EtherType at a fixed offset 12."""
+
+    def _frame(self):
+        return RTFrame(
+            frame_id=0xC001,
+            cycle_counter=42,
+            data_status=RTFrame.DATA_VALID | RTFrame.DATA_RUN,
+            transfer_status=0,
+            payload=b"\xde\xad\xbe\xef" + b"\x00" * 36,
+        )
+
+    def test_tagged_round_trip(self):
+        from profinet.rt import build_ethernet_frame, parse_ethernet_frame
+
+        raw = build_ethernet_frame(DEV_MAC, CTRL_MAC, self._frame())
+        assert raw[12:14] == b"\x81\x00"  # builder emits a tagged frame
+        parsed = parse_ethernet_frame(raw)
+        assert parsed is not None
+        assert parsed.frame_id == 0xC001
+        assert parsed.cycle_counter == 42
+
+    def test_untagged_still_parses(self):
+        from profinet.rt import parse_ethernet_frame
+
+        raw = DEV_MAC + CTRL_MAC + b"\x88\x92" + self._frame().to_bytes()
+        parsed = parse_ethernet_frame(raw)
+        assert parsed is not None
+        assert parsed.frame_id == 0xC001
+
+    def test_non_profinet_ethertype_rejected(self):
+        from profinet.rt import parse_ethernet_frame
+
+        raw = DEV_MAC + CTRL_MAC + b"\x08\x00" + b"\x00" * 46
+        assert parse_ethernet_frame(raw) is None
+
+
+# =============================================================================
+# Received IOPS gates input data
+# =============================================================================
+
+
+class TestReceivedIops:
+    """A device that pulls a module keeps sending the frame with valid
+    DataStatus but marks that submodule's IOPS BAD over stale payload bytes.
+    Delivering those bytes as good data is a safety defect."""
+
+    @staticmethod
+    def _payload(data, iops):
+        return data + bytes([iops]) + b"\x00" * 35
+
+    def test_good_iops_delivers_data(self):
+        ctrl = make_controller()
+        ctrl._process_input_frame(
+            build_input_eth_frame(payload=self._payload(b"\xaa\xbb\xcc\xdd", 0x80))
+        )
+        assert ctrl.get_input_data(1, 1) == b"\xaa\xbb\xcc\xdd"
+        assert ctrl.is_input_good(1, 1)
+        assert ctrl.get_input_status(1, 1) == 0x80
+
+    def test_bad_iops_withholds_stale_data(self):
+        ctrl = make_controller()
+        ctrl._process_input_frame(
+            build_input_eth_frame(payload=self._payload(b"\xaa\xbb\xcc\xdd", 0x80))
+        )
+        ctrl._process_input_frame(
+            build_input_eth_frame(payload=self._payload(b"\xaa\xbb\xcc\xdd", 0x00))
+        )
+        assert ctrl.get_input_data(1, 1) is None
+        assert not ctrl.is_input_good(1, 1)
+        # The raw bytes stay reachable for diagnostics.
+        assert ctrl.get_input_data(1, 1, allow_bad=True) == b"\xaa\xbb\xcc\xdd"
+
+    def test_status_callback_fires_on_transitions_only(self):
+        ctrl = make_controller()
+        events = []
+        ctrl.on_input_status(lambda slot, subslot, iops: events.append((slot, subslot, iops)))
+
+        good = build_input_eth_frame(payload=self._payload(b"\x01\x02\x03\x04", 0x80))
+        bad = build_input_eth_frame(payload=self._payload(b"\x01\x02\x03\x04", 0x00))
+        ctrl._process_input_frame(good)
+        ctrl._process_input_frame(good)  # no transition
+        ctrl._process_input_frame(bad)
+        ctrl._process_input_frame(bad)  # no transition
+        assert events == [(1, 1, 0x80), (1, 1, 0x00)]
+
+    def test_input_callback_skips_bad_data(self):
+        ctrl = make_controller()
+        delivered = []
+        ctrl.on_input(lambda slot, subslot, data: delivered.append(data))
+        ctrl._process_input_frame(
+            build_input_eth_frame(payload=self._payload(b"\x01\x02\x03\x04", 0x80))
+        )
+        ctrl._process_input_frame(
+            build_input_eth_frame(payload=self._payload(b"\x09\x09\x09\x09", 0x00))
+        )
+        assert delivered == [b"\x01\x02\x03\x04"]
+
+    def test_iops_masks_lower_bits(self):
+        """DataState is bit 7; Instance/Extension bits must not break the check."""
+        ctrl = make_controller()
+        ctrl._process_input_frame(
+            build_input_eth_frame(payload=self._payload(b"\x01\x02\x03\x04", 0x81))
+        )
+        assert ctrl.is_input_good(1, 1)
+        assert ctrl.get_input_data(1, 1) == b"\x01\x02\x03\x04"

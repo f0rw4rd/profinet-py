@@ -106,7 +106,14 @@ def cmd_set_param(args: argparse.Namespace) -> int:
     try:
         src = get_mac(args.interface)
 
-        success = dcp.set_param(sock, src, args.target, args.param, args.value)
+        success = dcp.set_param(
+            sock,
+            src,
+            args.target,
+            args.param,
+            args.value,
+            permanent=getattr(args, "permanent", False),
+        )
         if success:
             print(f"Set {args.param} = {args.value}")
             return 0
@@ -126,11 +133,15 @@ def cmd_read(args: argparse.Namespace) -> int:
         print(f"Connecting to {args.target}...")
         info = rpc.get_station_info(sock, src, args.target)
 
+        idx = int(args.index, 16) if args.index.startswith("0x") else int(args.index)
         with rpc.RPCCon(info) as conn:
-            conn.connect(src)
-
-            idx = int(args.index, 16) if args.index.startswith("0x") else int(args.index)
-            iod = conn.read(api=args.api, slot=args.slot, subslot=args.subslot, idx=idx)
+            if getattr(args, "implicit", False):
+                # AR-less Read Implicit: works even on devices that reject
+                # the Device Access AR
+                iod = conn.read_implicit(args.api, args.slot, args.subslot, idx)
+            else:
+                conn.connect(src)
+                iod = conn.read(api=args.api, slot=args.slot, subslot=args.subslot, idx=idx)
 
             print(f"Read {len(iod.payload)} bytes:")
             print(iod.payload.hex())
@@ -642,8 +653,13 @@ def create_parser() -> argparse.ArgumentParser:
     # set-param
     sub = subparsers.add_parser("set-param", help="Write device parameter")
     sub.add_argument("target", metavar="MAC", help="Device MAC address (e.g. aa:bb:cc:dd:ee:ff)")
-    sub.add_argument("param", choices=["name", "ip"], help="Parameter to write")
+    sub.add_argument("param", choices=["name"], help="Parameter to write (use set-ip for IP)")
     sub.add_argument("value", help="New value")
+    sub.add_argument(
+        "--permanent",
+        action="store_true",
+        help="Store permanently (survives device power cycle)",
+    )
     sub.set_defaults(func=cmd_set_param)
 
     # read
@@ -653,6 +669,11 @@ def create_parser() -> argparse.ArgumentParser:
     sub.add_argument("--slot", type=int, required=True, help="Slot number")
     sub.add_argument("--subslot", type=int, required=True, help="Subslot number")
     sub.add_argument("--index", required=True, help="Record index (hex with 0x prefix)")
+    sub.add_argument(
+        "--implicit",
+        action="store_true",
+        help="Use AR-less Read Implicit (for devices that reject the Device Access AR)",
+    )
     sub.set_defaults(func=cmd_read)
 
     # write

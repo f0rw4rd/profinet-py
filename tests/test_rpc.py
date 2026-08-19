@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, ".")
 
 from profinet.dcp import DCPDeviceDescription
-from profinet.protocol import PNDCPBlock
+from profinet.protocol import PNBlockHeader, PNDCPBlock, PNIODReleaseBlock
 from profinet.rpc import (
     MAU_TYPES,
     ARInfo,
@@ -1014,7 +1014,10 @@ def _build_rpc_bytes_le(packet_type=0x02, operation_number=0x02, payload=b""):
     # Single-byte fields are endian-independent
     hdr = _struct.pack(
         "BBBB3sB",
-        0x04, packet_type, 0x00, 0x00,
+        0x04,
+        packet_type,
+        0x00,
+        0x00,
         bytes([0x10, 0x00, 0x00]),  # DREP = little-endian
         0x00,
     )
@@ -1024,16 +1027,16 @@ def _build_rpc_bytes_le(packet_type=0x02, operation_number=0x02, payload=b""):
     # Multi-byte fields in little-endian
     hdr += _struct.pack(
         "<IIIHHHHHBB",
-        0,                  # server_boot_time
-        1,                  # interface_version
-        0,                  # sequence_number
+        0,  # server_boot_time
+        1,  # interface_version
+        0,  # sequence_number
         operation_number,
-        0xFFFF,             # interface_hint
-        0xFFFF,             # activity_hint
-        body_len,           # length_of_body
-        0,                  # fragment_number
-        0,                  # auth_protocol
-        0,                  # serial_low
+        0xFFFF,  # interface_hint
+        0xFFFF,  # activity_hint
+        body_len,  # length_of_body
+        0,  # fragment_number
+        0,  # auth_protocol
+        0,  # serial_low
     )
     return hdr + payload
 
@@ -1050,9 +1053,7 @@ class TestSendReceiveLittleEndian:
         """Create RPCCon with mocked sockets."""
         blocks = {
             PNDCPBlock.NAME_OF_STATION: b"test-device",
-            PNDCPBlock.IP_ADDRESS: bytes(
-                [192, 168, 1, 100, 255, 255, 255, 0, 192, 168, 1, 1]
-            ),
+            PNDCPBlock.IP_ADDRESS: bytes([192, 168, 1, 100, 255, 255, 255, 0, 192, 168, 1, 1]),
             PNDCPBlock.DEVICE_ID: bytes([0x00, 0x2A, 0x00, 0x01]),
         }
         info = DCPDeviceDescription(b"\x00\x11\x22\x33\x44\x55", blocks)
@@ -1071,16 +1072,29 @@ class TestSendReceiveLittleEndian:
             payload=b"\x00" * 20,
         )
 
-        mock_rpc._socket.recvfrom = MagicMock(
-            return_value=(le_response, ("192.168.1.100", 34964))
-        )
+        mock_rpc._socket.recvfrom = MagicMock(return_value=(le_response, ("192.168.1.100", 34964)))
         mock_rpc._socket.sendto = MagicMock()
 
         rpc_req = PNRPCHeader(
-            0x04, PNRPCHeader.REQUEST, 0, 0,
-            b"\x00\x00\x00", 0,
-            b"\x00" * 16, b"\x00" * 16, b"\x00" * 16,
-            0, 1, 0, PNRPCHeader.READ, 0xFFFF, 0xFFFF, 0, 0, 0, 0,
+            0x04,
+            PNRPCHeader.REQUEST,
+            0,
+            0,
+            b"\x00\x00\x00",
+            0,
+            b"\x00" * 16,
+            b"\x00" * 16,
+            b"\x00" * 16,
+            0,
+            1,
+            0,
+            PNRPCHeader.READ,
+            0xFFFF,
+            0xFFFF,
+            0,
+            0,
+            0,
+            0,
             payload=b"",
         )
 
@@ -1096,19 +1110,32 @@ class TestSendReceiveLittleEndian:
         le_response = _build_rpc_bytes_le(
             packet_type=PNRPCHeader.RESPONSE,
             operation_number=0x03,
-            payload=b"\xAB" * 10,
+            payload=b"\xab" * 10,
         )
 
-        mock_rpc._socket.recvfrom = MagicMock(
-            return_value=(le_response, ("192.168.1.100", 34964))
-        )
+        mock_rpc._socket.recvfrom = MagicMock(return_value=(le_response, ("192.168.1.100", 34964)))
         mock_rpc._socket.sendto = MagicMock()
 
         rpc_req = PNRPCHeader(
-            0x04, PNRPCHeader.REQUEST, 0, 0,
-            b"\x00\x00\x00", 0,
-            b"\x00" * 16, b"\x00" * 16, b"\x00" * 16,
-            0, 1, 0, PNRPCHeader.WRITE, 0xFFFF, 0xFFFF, 0, 0, 0, 0,
+            0x04,
+            PNRPCHeader.REQUEST,
+            0,
+            0,
+            b"\x00\x00\x00",
+            0,
+            b"\x00" * 16,
+            b"\x00" * 16,
+            b"\x00" * 16,
+            0,
+            1,
+            0,
+            PNRPCHeader.WRITE,
+            0xFFFF,
+            0xFFFF,
+            0,
+            0,
+            0,
+            0,
             payload=b"",
         )
 
@@ -1287,4 +1314,53 @@ class TestCControlSocketLifecycle:
 
             rpc = RPCCon(info)
             assert rpc._ccontrol_socket is None
+            rpc.close()
+
+
+class TestApplicationReadyResponse:
+    """Test the CControl response envelope used by real PROFINET devices."""
+
+    def test_response_preserves_pnio_nrd_capacity_and_flags(self):
+        blocks = {
+            PNDCPBlock.NAME_OF_STATION: b"test-device",
+            PNDCPBlock.IP_ADDRESS: bytes([192, 168, 1, 100, 255, 255, 255, 0, 192, 168, 1, 1]),
+            PNDCPBlock.DEVICE_ID: bytes([0x00, 0x2A, 0x00, 0x01]),
+        }
+        info = DCPDeviceDescription(b"\x00\x11\x22\x33\x44\x55", blocks)
+
+        with patch("profinet.rpc.socket") as mock_socket_cls:
+            mock_main = MagicMock()
+            mock_ccontrol = MagicMock()
+            mock_socket_cls.side_effect = [mock_main, mock_ccontrol]
+            rpc = RPCCon(info)
+
+            request_block = PNIODReleaseBlock(
+                block_header=bytes(PNBlockHeader(0x0112, 28, 0x01, 0x00)),
+                padding1=0,
+                ar_uuid=rpc.ar_uuid,
+                session_key=rpc.session_key,
+                padding2=0,
+                control_command=0x0002,
+                control_block_properties=0,
+                payload=b"",
+            )
+            nrd = _struct.pack("<IIIII", 1392, 32, 1392, 0, 32) + bytes(request_block)
+            request = (
+                _struct.pack("!BBBB3sB", 4, 0, 0x20, 0, b"\x10\x00\x00", 0)
+                + bytes(16)
+                + bytes(16)
+                + bytes(16)
+                + _struct.pack("<IIIHHHHHBB", 0, 1, 0, 4, 0xFFFF, 0xFFFF, len(nrd), 0, 0, 0)
+                + nrd
+            )
+            mock_ccontrol.recvfrom.return_value = (request, ("192.168.1.55", 53247))
+            rpc.live = True
+
+            rpc.application_ready(timeout=1.0)
+
+            response = mock_ccontrol.sendto.call_args.args[0]
+            assert response[:4] == b"\x04\x02\x0A\x00"
+            assert _struct.unpack_from("<IIIII", response, 80) == (0, 32, 1392, 0, 32)
+            assert response[100:102] == b"\x81\x12"
+            assert _struct.unpack_from(">H", response, 128)[0] == 0x0008
             rpc.close()

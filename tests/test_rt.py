@@ -410,7 +410,7 @@ class TestEthernetFrameHelpers:
 
     def test_build_ethernet_frame(self):
         """Test building complete Ethernet frame."""
-        dst = b"\xd0\xc8\x57\xe0\x1c\x2c"
+        dst = b"\x02\x00\x00\x00\x00\x01"
         src = b"\x00\x11\x22\x33\x44\x55"
         rt = RTFrame(0xC000, 100, 0xA4, 0, b"\x01\x02\x03\x04")
 
@@ -418,13 +418,14 @@ class TestEthernetFrameHelpers:
 
         assert eth[0:6] == dst
         assert eth[6:12] == src
-        assert eth[12:14] == b"\x88\x92"  # PROFINET EtherType
-        assert eth[14:16] == b"\xc0\x00"  # Frame ID
+        assert eth[12:16] == b"\x81\x00\xc0\x00"  # 802.1Q tag, PCP 6, VID 0
+        assert eth[16:18] == b"\x88\x92"  # PROFINET EtherType
+        assert eth[18:20] == b"\xc0\x00"  # Frame ID
 
     def test_parse_ethernet_frame(self):
         """Test parsing Ethernet frame."""
         # Build a valid frame
-        dst = b"\xd0\xc8\x57\xe0\x1c\x2c"
+        dst = b"\x02\x00\x00\x00\x00\x01"
         src = b"\x00\x11\x22\x33\x44\x55"
         rt_data = b"\xc0\x00\x01\x02\x03\x04\x00\x64\xa4\x00"  # RT frame
         eth = dst + src + b"\x88\x92" + rt_data
@@ -439,7 +440,7 @@ class TestEthernetFrameHelpers:
     def test_parse_non_profinet_returns_none(self):
         """Test parsing non-PROFINET frame returns None."""
         # IPv4 frame
-        dst = b"\xd0\xc8\x57\xe0\x1c\x2c"
+        dst = b"\x02\x00\x00\x00\x00\x01"
         src = b"\x00\x11\x22\x33\x44\x55"
         eth = dst + src + b"\x08\x00" + b"\x00" * 20  # IPv4
 

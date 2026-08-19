@@ -323,9 +323,25 @@ class TestMakePacketNamedtupleCompat:
 
         data = struct.pack(
             ">BB BB 3s B 16s 16s 16s III HHH HH BB",
-            0x04, 0x02, 0, 0, b"\x00\x00\x00", 0,
-            b"\x00" * 16, b"\x00" * 16, b"\x00" * 16,
-            0, 1, 0, 0x02, 0xFFFF, 0xFFFF, 0, 0, 0, 0,
+            0x04,
+            0x02,
+            0,
+            0,
+            b"\x00\x00\x00",
+            0,
+            b"\x00" * 16,
+            b"\x00" * 16,
+            b"\x00" * 16,
+            0,
+            1,
+            0,
+            0x02,
+            0xFFFF,
+            0xFFFF,
+            0,
+            0,
+            0,
+            0,
         )
         pkt = PNRPCHeader(data)
         replaced = pkt._replace(operation_number=0x05)
@@ -345,9 +361,25 @@ class TestMakePacketNamedtupleCompat:
 
         data = struct.pack(
             ">BB BB 3s B 16s 16s 16s III HHH HH BB",
-            0x04, 0x02, 0, 0, b"\x00\x00\x00", 0,
-            b"\x00" * 16, b"\x00" * 16, b"\x00" * 16,
-            0, 1, 0, 0x02, 0xFFFF, 0xFFFF, 0, 0, 0, 0,
+            0x04,
+            0x02,
+            0,
+            0,
+            b"\x00\x00\x00",
+            0,
+            b"\x00" * 16,
+            b"\x00" * 16,
+            b"\x00" * 16,
+            0,
+            1,
+            0,
+            0x02,
+            0xFFFF,
+            0xFFFF,
+            0,
+            0,
+            0,
+            0,
         )
         pkt = PNRPCHeader(data)
         pkt2 = PNRPCHeader._make(list(pkt))
@@ -366,9 +398,25 @@ class TestMakePacketNamedtupleCompat:
 
         data = struct.pack(
             ">BB BB 3s B 16s 16s 16s III HHH HH BB",
-            0x04, 0x02, 0, 0, b"\x00\x00\x00", 0,
-            b"\x00" * 16, b"\x00" * 16, b"\x00" * 16,
-            0, 1, 0, 0x02, 0xFFFF, 0xFFFF, 0, 0, 0, 0,
+            0x04,
+            0x02,
+            0,
+            0,
+            b"\x00\x00\x00",
+            0,
+            b"\x00" * 16,
+            b"\x00" * 16,
+            b"\x00" * 16,
+            0,
+            1,
+            0,
+            0x02,
+            0xFFFF,
+            0xFFFF,
+            0,
+            0,
+            0,
+            0,
         )
         pkt = PNRPCHeader(data)
         assert len(pkt) == 80

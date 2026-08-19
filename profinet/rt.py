@@ -21,6 +21,8 @@ from typing import List, Optional
 
 import construct as cs
 
+from .util import skip_vlan_tags
+
 # EtherType for PROFINET RT frames
 ETHERTYPE_PROFINET = 0x8892
 
@@ -49,8 +51,16 @@ EtherTypeStruct = cs.Struct(
 )
 
 # Frame ID ranges
-FRAME_ID_RT_CLASS_1_MIN = 0x8000
-FRAME_ID_RT_CLASS_1_MAX = 0xFBFF
+# RTC1 (legacy RT_CLASS_1) cyclic frame ID range per IEC 61158-6-10;
+# 0x8000-0xBFFF is a separate range (RT_CLASS_2 in pre-V2.3 spec naming)
+FRAME_ID_RT_CLASS_1_MIN = 0xC000
+FRAME_ID_RT_CLASS_1_MAX = 0xF7FF
+
+# 802.1Q priority tag for cyclic RT frames per IEC 61158-6-10: TPID 0x8100,
+# PCP 6, VID 0 (TCI 0xC000, matching the negotiated IOCRTagHeader). Devices
+# validate the negotiated priority, and managed switches may drop untagged
+# sub-64-byte RT frames as runts, so TX frames must carry the tag.
+VLAN_TAG_RT = b"\x81\x00\xc0\x00"
 FRAME_ID_ALARM_HIGH = 0xFC01
 FRAME_ID_ALARM_LOW = 0xFE01
 
@@ -76,6 +86,9 @@ DATA_STATUS_IGNORE = 0x80  # 1=Ignore frame
 IOXS_GOOD = 0x80  # Good data, subslot level
 IOXS_BAD = 0x00  # Bad data
 IOXS_EXTENSION = 0x01  # More IOxS follows
+# DataState is bit 7 of an IOxS byte; the lower bits carry Instance and
+# Extension, so a received IOxS must be masked rather than compared to IOXS_GOOD.
+IOXS_DATA_STATE_GOOD = 0x80
 
 
 @dataclass
@@ -606,7 +619,7 @@ def build_ethernet_frame(
     Returns:
         Complete Ethernet frame bytes
     """
-    return dst_mac + src_mac + _ETHERTYPE_PROFINET_BYTES + rt_frame.to_bytes()
+    return dst_mac + src_mac + VLAN_TAG_RT + _ETHERTYPE_PROFINET_BYTES + rt_frame.to_bytes()
 
 
 def parse_ethernet_frame(data: bytes) -> Optional[RTFrame]:
@@ -621,11 +634,17 @@ def parse_ethernet_frame(data: bytes) -> Optional[RTFrame]:
     if len(data) < 18:  # 14 (eth) + 4 (min RT)
         return None
 
-    parsed_eth = EtherTypeStruct.parse(data[12:14])
+    # RT frames are priority-tagged, including the ones build_ethernet_frame
+    # emits, so the EtherType is not at a fixed offset.
+    eth_offset = skip_vlan_tags(data)
+    if len(data) < eth_offset + 2:
+        return None
+
+    parsed_eth = EtherTypeStruct.parse(data[eth_offset : eth_offset + 2])
     if parsed_eth.ethertype != ETHERTYPE_PROFINET:
         return None
 
     try:
-        return RTFrame.from_bytes(data[14:])
+        return RTFrame.from_bytes(data[eth_offset + 2 :])
     except ValueError:
         return None

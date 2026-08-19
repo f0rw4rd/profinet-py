@@ -38,7 +38,8 @@ jobs:
           python-version: "3.12"
 
       - name: Install ruff
-        run: pip install --only-binary :all: "ruff>=0.15.0"
+        run: |
+          pip install --only-binary=:all: "ruff>=0.15.0"
 
       - name: Run ruff format
         run: ruff format profinet/

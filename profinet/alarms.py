@@ -47,6 +47,12 @@ _AlarmNotificationBodyStruct = cs.Struct(
     "alarm_specifier" / cs.Int16ub,
 )
 
+# AlarmNotification body size in bytes (IEC 61158-6-10): AlarmType(2) + API(4) +
+# SlotNumber(2) + SubslotNumber(2) + ModuleIdent(4) + SubmoduleIdent(4) +
+# AlarmSpecifier(2). The block header (6) precedes it, so the item-less PDU is
+# 26 bytes and BlockLength reads 22 (bytes following the BlockLength field).
+_ALARM_BODY_LEN = _AlarmNotificationBodyStruct.sizeof()
+
 _PralStruct = cs.Struct(
     "channel_num" / cs.Int16ub,
     "channel_props" / cs.Int16ub,
@@ -534,7 +540,7 @@ def parse_alarm_notification(data: bytes) -> AlarmNotification:
     Raises:
         ValueError: If data is truncated or invalid
     """
-    if len(data) < 28:  # Minimum: BlockHeader(6) + Body(22)
+    if len(data) < 26:  # Minimum: BlockHeader(6) + Body(20)
         raise ValueError("AlarmNotification too short")
 
     offset = 0
@@ -546,8 +552,16 @@ def parse_alarm_notification(data: bytes) -> AlarmNotification:
     ver_low = hdr.ver_low
     offset += 6
 
+    # BlockLength counts the bytes following the BlockLength field, so the block
+    # ends at 4 + block_length. Anything past that is not part of the alarm:
+    # senders pad short frames to the 60-byte Ethernet minimum, and parsing that
+    # padding yields phantom items with USI 0x0000.
+    block_end = 4 + hdr.block_length
+    if 6 + _ALARM_BODY_LEN <= block_end < len(data):
+        data = data[:block_end]
+
     # Parse PDU body
-    body = _AlarmNotificationBodyStruct.parse(data[offset : offset + 22])
+    body = _AlarmNotificationBodyStruct.parse(data[offset : offset + _ALARM_BODY_LEN])
     alarm_type = body.alarm_type
     api = body.api
     slot_number = body.slot_number
@@ -555,14 +569,14 @@ def parse_alarm_notification(data: bytes) -> AlarmNotification:
     module_ident = body.module_ident
     submodule_ident = body.submodule_ident
     alarm_specifier = body.alarm_specifier
-    offset += 22
+    offset += _ALARM_BODY_LEN
 
     # Decode alarm specifier bits
     seq_num = alarm_specifier & 0x07FF  # Bits 0-10
     channel_diag = bool(alarm_specifier & 0x0800)  # Bit 11
     mfr_specific = bool(alarm_specifier & 0x1000)  # Bit 12
     submod_diag = bool(alarm_specifier & 0x2000)  # Bit 13
-    ar_diag = bool(alarm_specifier & 0x4000)  # Bit 14
+    ar_diag = bool(alarm_specifier & 0x8000)  # Bit 15 (bit 14 is reserved)
 
     notification = AlarmNotification(
         block_type=block_type,

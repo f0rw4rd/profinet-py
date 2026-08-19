@@ -17,6 +17,7 @@ from profinet.rt import (
     DATA_STATUS_VALID,
     IOCR_TYPE_INPUT,
     IOCR_TYPE_OUTPUT,
+    IOXS_BAD,
     IOCRConfig,
     IODataObject,
 )
@@ -66,7 +67,7 @@ def make_controller(**kwargs):
     defaults = {
         "interface": "eth0",
         "src_mac": b"\x00\x11\x22\x33\x44\x55",
-        "dst_mac": b"\xd0\xc8\x57\xe0\x1c\x2c",
+        "dst_mac": b"\x02\x00\x00\x00\x00\x01",
         "input_iocr": make_input_iocr(),
         "output_iocr": make_output_iocr(),
     }
@@ -346,6 +347,20 @@ class TestWatchdogBehavior:
         for _ in range(100):
             ctrl._handle_watchdog_timeout()
         assert ctrl.state == CyclicState.RUNNING  # never goes to FAULT
+
+    def test_disable_fault_with_zero_keeps_iocs_good(self):
+        ctrl = make_controller(max_consecutive_timeouts=0)
+        ctrl._state = CyclicState.RUNNING
+        ctrl._output_builder.set_all_iocs = MagicMock()
+        ctrl._handle_watchdog_timeout()
+        ctrl._output_builder.set_all_iocs.assert_not_called()
+
+    def test_watchdog_timeout_marks_iocs_bad_when_faulting_enabled(self):
+        ctrl = make_controller(max_consecutive_timeouts=3)
+        ctrl._state = CyclicState.RUNNING
+        ctrl._output_builder.set_all_iocs = MagicMock()
+        ctrl._handle_watchdog_timeout()
+        ctrl._output_builder.set_all_iocs.assert_called_once_with(IOXS_BAD)
 
     def test_consecutive_timeouts_reset_on_rx(self):
         """Receiving a frame resets the consecutive timeout counter.
@@ -814,8 +829,15 @@ class TestBuildIOCRConfigs:
 class TestVersion:
     """Test version string matches pyproject.toml."""
 
-    def test_version_is_0_6_0(self):
-        """__version__ should be 0.6.0 for this release."""
+    def test_version_matches_pyproject(self):
+        """__version__ must stay in sync with pyproject.toml."""
+        import re
+        from pathlib import Path
+
         import profinet
 
-        assert profinet.__version__ == "0.6.0"
+        # re instead of tomllib: the test matrix still includes Python 3.10
+        pyproject = (Path(__file__).parent.parent / "pyproject.toml").read_text()
+        match = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE)
+        assert match is not None
+        assert profinet.__version__ == match.group(1)

@@ -275,7 +275,7 @@ from .vendors import (
     profinet_vendor_map,
 )
 
-__version__ = "0.6.0"
+__version__ = "0.6.3"
 __all__ = [
     # Protocol structures
     "EthernetHeader",

@@ -829,8 +829,15 @@ class TestBuildIOCRConfigs:
 class TestVersion:
     """Test version string matches pyproject.toml."""
 
-    def test_version_is_0_6_0(self):
-        """__version__ should be 0.6.0 for this release."""
+    def test_version_matches_pyproject(self):
+        """__version__ must stay in sync with pyproject.toml."""
+        import re
+        from pathlib import Path
+
         import profinet
 
-        assert profinet.__version__ == "0.6.0"
+        # re instead of tomllib: the test matrix still includes Python 3.10
+        pyproject = (Path(__file__).parent.parent / "pyproject.toml").read_text()
+        match = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE)
+        assert match is not None
+        assert profinet.__version__ == match.group(1)

@@ -427,6 +427,15 @@ def _build_iocr_configs(
     return input_iocr, output_iocr
 
 
+def _process_io_slots(slots: List[IOSlot]) -> List[IOSlot]:
+    """Return only slots that carry cyclic process data.
+
+    Zero-input/zero-output submodules remain part of the discovered and
+    matched topology, but they are not members of the cyclic IOCRs.
+    """
+    return [slot for slot in slots if slot.input_length > 0 or slot.output_length > 0]
+
+
 def cmd_cyclic(args: argparse.Namespace) -> int:
     """Execute cyclic IO command."""
     from .cyclic import CyclicController
@@ -466,6 +475,7 @@ def cmd_cyclic(args: argparse.Namespace) -> int:
                 sub_assign.setdefault(slot_n, {})[subslot_n] = sub_id
 
         io_slots = gsdml_device.build_io_slots_from_device(device_slots)
+        process_io_slots = _process_io_slots(io_slots)
 
         print("Matching against GSDML...")
         total_in = 0
@@ -494,7 +504,7 @@ def cmd_cyclic(args: argparse.Namespace) -> int:
         reduction_ratio = cycle_ms
 
         setup = IOCRSetup(
-            slots=io_slots,
+            slots=process_io_slots,
             send_clock_factor=send_clock_factor,
             reduction_ratio=reduction_ratio,
             watchdog_factor=6,
@@ -535,7 +545,7 @@ def cmd_cyclic(args: argparse.Namespace) -> int:
 
         # Step 6: Build IOCRConfigs and start cyclic controller
         input_iocr, output_iocr = _build_iocr_configs(
-            io_slots,
+            process_io_slots,
             result.input_frame_id,
             result.output_frame_id,
             send_clock_factor,
@@ -554,7 +564,7 @@ def cmd_cyclic(args: argparse.Namespace) -> int:
         )
 
         # Collect input data for display
-        input_slots = [(s.slot, s.subslot) for s in io_slots if s.input_length > 0]
+        input_slots = [(s.slot, s.subslot) for s in process_io_slots if s.input_length > 0]
         latest_input: Dict[Tuple[int, int], bytes] = {}
 
         def on_input(slot: int, subslot: int, data: bytes) -> None:

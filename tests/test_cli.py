@@ -10,6 +10,8 @@ from unittest.mock import MagicMock
 import pytest
 
 import profinet.cli as cli
+import profinet.cyclic as cyclic_module
+import profinet.gsdml as gsdml_module
 from profinet.exceptions import DCPDeviceNotFoundError, PermissionDeniedError, RPCError
 from profinet.rpc import IOSlot
 from profinet.rt import IOCR_TYPE_INPUT, IOCR_TYPE_OUTPUT
@@ -322,3 +324,59 @@ class TestBuildIocrConfigs:
         )
         assert input_iocr.data_length == 40
         assert output_iocr.data_length == 40
+
+
+class TestCyclicProcessIOSlots:
+    def test_cyclic_setup_and_runtime_use_process_io_only(self, net, monkeypatch):
+        topology_slots = [
+            IOSlot(0, 0x8000, 0, 0, module_ident=1, submodule_ident=0x100),
+            IOSlot(0, 0x8001, 0, 0, module_ident=1, submodule_ident=0x200),
+            IOSlot(1, 1, 24, 0, module_ident=2, submodule_ident=1),
+            IOSlot(2, 1, 0, 32, module_ident=3, submodule_ident=1),
+        ]
+        gsdml_device = MagicMock()
+        gsdml_device.build_io_slots_from_device.return_value = topology_slots
+        monkeypatch.setattr(gsdml_module, "load_gsdml", MagicMock(return_value=gsdml_device))
+
+        info = SimpleNamespace(ip="192.168.0.10", mac="02:00:00:00:00:01")
+        monkeypatch.setattr(cli.rpc, "get_station_info", MagicMock(return_value=info))
+        conn = MagicMock()
+        conn.discover_slots.return_value = topology_slots
+        conn._socket.recvfrom.side_effect = TimeoutError
+        conn.connect.side_effect = [
+            None,
+            SimpleNamespace(has_cyclic=True, input_frame_id=0xC001, output_frame_id=0x8002),
+        ]
+        monkeypatch.setattr(cli.rpc, "RPCCon", MagicMock(return_value=conn))
+
+        cyclic = MagicMock()
+        monkeypatch.setattr(cyclic_module, "CyclicController", cyclic)
+        build_configs = MagicMock(wraps=cli._build_iocr_configs)
+        monkeypatch.setattr(cli, "_build_iocr_configs", build_configs)
+        monotonic = iter((0.0, 1.1))
+        monkeypatch.setattr(cli.time, "monotonic", lambda: next(monotonic))
+        monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
+
+        args = SimpleNamespace(
+            interface="eth0",
+            target="anybus-inarco",
+            gsdml="device.gsdml",
+            submodule=None,
+            cycle_ms=32,
+            duration=1,
+        )
+
+        assert cli.cmd_cyclic(args) == 0
+        assert len(topology_slots) == 4
+
+        setup = conn.connect.call_args_list[1].kwargs["iocr_setup"]
+        assert setup.slots is not topology_slots
+        assert [(slot.slot, slot.subslot) for slot in setup.slots] == [(1, 1), (2, 1)]
+        assert build_configs.call_args.args[0] is setup.slots
+
+        input_iocr, output_iocr = (
+            cyclic.call_args.kwargs["input_iocr"],
+            cyclic.call_args.kwargs["output_iocr"],
+        )
+        assert [(obj.slot, obj.subslot) for obj in input_iocr.objects] == [(1, 1)]
+        assert [(obj.slot, obj.subslot) for obj in output_iocr.objects] == [(2, 1)]

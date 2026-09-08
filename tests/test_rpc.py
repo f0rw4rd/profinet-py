@@ -1359,7 +1359,7 @@ class TestApplicationReadyResponse:
             rpc.application_ready(timeout=1.0)
 
             response = mock_ccontrol.sendto.call_args.args[0]
-            assert response[:4] == b"\x04\x02\x0A\x00"
+            assert response[:4] == b"\x04\x02\x0a\x00"
             assert _struct.unpack_from("<IIIII", response, 80) == (0, 32, 1392, 0, 32)
             assert response[100:102] == b"\x81\x12"
             assert _struct.unpack_from(">H", response, 128)[0] == 0x0008

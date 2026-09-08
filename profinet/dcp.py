@@ -1132,7 +1132,7 @@ def set_ip(
         return False
 
 
-def send_discover(sock: socket, src: bytes, response_delay: int = 0x0080) -> None:
+def send_discover(sock: socket, src: bytes, response_delay: int = 0x0080) -> int:
     """Send DCP Identify multicast request.
 
     Sends an Identify request to the PROFINET multicast address
@@ -1164,6 +1164,7 @@ def send_discover(sock: socket, src: bytes, response_delay: int = 0x0080) -> Non
 
     sock.send(bytes(eth))
     logger.debug(f"Sent DCP Identify request (xid=0x{xid:08X})")
+    return xid
 
 
 def send_request(
@@ -1171,7 +1172,7 @@ def send_request(
     src: bytes,
     block_type: Tuple[int, int],
     value: bytes,
-) -> None:
+) -> int:
     """Send DCP Identify request with specific filter.
 
     Args:
@@ -1201,6 +1202,7 @@ def send_request(
 
     sock.send(bytes(eth))
     logger.debug(f"Sent DCP request for {block_type} (xid=0x{xid:08X})")
+    return xid
 
 
 def read_response(
@@ -1268,6 +1270,11 @@ def read_response(
 
                 if debug:
                     logger.info(f"DCP response from {mac2s(eth.src)}")
+
+                # Ignore cyclic IO and alarms.
+                frame_id = int.from_bytes(payload[:2], "big")
+                if frame_id not in (DCP_IDENTIFY_RESPONSE_FRAME_ID, DCP_GET_SET_FRAME_ID):
+                    continue
 
                 # Parse DCP header
                 try:

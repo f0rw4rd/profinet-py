@@ -879,15 +879,15 @@ def get_station_info(
         DCPDeviceNotFoundError: If device not found
     """
     # Try filtered identify-by-name first
-    dcp.send_request(sock, src, PNDCPBlock.NAME_OF_STATION, bytes(name, "utf-8"))
-    responses = dcp.read_response(sock, src, timeout_sec=timeout_sec, once=True)
+    xid = dcp.send_request(sock, src, PNDCPBlock.NAME_OF_STATION, bytes(name, "utf-8"))
+    responses = dcp.read_response(sock, src, timeout_sec=timeout_sec, once=True, expected_xid=xid)
 
     if not responses:
         # Some devices don't respond to filtered identify requests.
         # Fall back to broadcast discover and filter by name.
         logger.debug("Filtered identify failed, falling back to broadcast discover")
-        dcp.send_discover(sock, src)
-        responses = dcp.read_response(sock, src, timeout_sec=timeout_sec)
+        xid = dcp.send_discover(sock, src)
+        responses = dcp.read_response(sock, src, timeout_sec=timeout_sec, expected_xid=xid)
 
         # Filter by name
         for mac, blocks in responses.items():

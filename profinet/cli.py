@@ -429,10 +429,12 @@ def _build_iocr_configs(
 
 def cmd_cyclic(args: argparse.Namespace) -> int:
     """Execute cyclic IO command."""
+    from .alarm_listener import AlarmEndpoint, AlarmListener
     from .cyclic import CyclicController
     from .gsdml import load_gsdml
 
     sock = ethernet_socket(args.interface, 3)
+    alarm_listener = None
     try:
         src = get_mac(args.interface)
 
@@ -520,6 +522,16 @@ def cmd_cyclic(args: argparse.Namespace) -> int:
             conn.close()
             return 1
 
+        if conn._alarm_cr_enabled:
+            endpoint = AlarmEndpoint(
+                interface=args.interface,
+                controller_ref=conn._alarm_ref,
+                device_ref=conn._device_alarm_ref,
+                device_mac=s2mac(info.mac),
+            )
+            alarm_listener = AlarmListener(endpoint, src)
+            alarm_listener.start()
+
         # Step 5: Parameter phase and ApplicationReady
         # After CONNECT with IOCR, the PRM phase is implicit (no PrmBegin needed).
         # PrmBegin is only for re-parameterization of an already-running AR.
@@ -602,6 +614,8 @@ def cmd_cyclic(args: argparse.Namespace) -> int:
         return 0
 
     finally:
+        if alarm_listener is not None:
+            alarm_listener.stop()
         sock.close()
 
 

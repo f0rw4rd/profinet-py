@@ -654,7 +654,8 @@ class TestGetStationInfo:
                 with pytest.raises(DCPDeviceNotFoundError, match="not found"):
                     get_station_info(mock_sock, b"\x00\x11\x22\x33\x44\x55", "unknown-device")
 
-    def test_get_station_info_found(self):
+    @pytest.mark.parametrize("broadcast", [False, True], ids=["filtered", "broadcast"])
+    def test_get_station_info_found(self, broadcast):
         """Test get_station_info returns device description."""
         mock_sock = MagicMock()
         mock_mac = b"\xaa\xbb\xcc\xdd\xee\xff"
@@ -664,11 +665,25 @@ class TestGetStationInfo:
             PNDCPBlock.DEVICE_ID: bytes([0x00, 0x2A, 0x00, 0x01]),
         }
 
-        with patch("profinet.rpc.dcp.send_request"):
-            with patch("profinet.rpc.dcp.read_response", return_value={mock_mac: mock_blocks}):
-                info = get_station_info(mock_sock, b"\x00\x11\x22\x33\x44\x55", "found-device")
-                assert info.name == "found-device"
-                assert info.ip == "192.168.1.100"
+        responses = [{mock_mac: mock_blocks}]
+        if broadcast:
+            responses.insert(0, {})
+
+        with (
+            patch("profinet.rpc.dcp.send_request", return_value=1),
+            patch("profinet.rpc.dcp.send_discover", return_value=2) as discover,
+            patch("profinet.rpc.dcp.read_response", side_effect=responses) as read,
+        ):
+            info = get_station_info(mock_sock, b"\x00\x11\x22\x33\x44\x55", "found-device")
+
+        assert info.name == "found-device"
+        assert info.ip == "192.168.1.100"
+        assert read.call_args_list[0].kwargs["expected_xid"] == 1
+        if broadcast:
+            discover.assert_called_once_with(mock_sock, b"\x00\x11\x22\x33\x44\x55")
+            assert read.call_args_list[1].kwargs["expected_xid"] == 2
+        else:
+            discover.assert_not_called()
 
 
 from profinet.rpc import (

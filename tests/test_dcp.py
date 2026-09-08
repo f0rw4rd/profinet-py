@@ -3,6 +3,7 @@
 import pytest
 
 from profinet.dcp import (
+    DCP_IDENTIFY_RESPONSE_FRAME_ID,
     DEVICE_ROLE_IO_CONTROLLER,
     DEVICE_ROLE_IO_DEVICE,
     DEVICE_ROLE_IO_MULTIDEVICE,
@@ -12,7 +13,8 @@ from profinet.dcp import (
     decode_device_role,
     get_block_name,
 )
-from profinet.protocol import PNDCPBlock
+from profinet.protocol import EthernetHeader, PNDCPBlock, PNDCPHeader
+from profinet.util import PROFINET_ETHERTYPE
 
 
 class TestDCPDeviceDescription:
@@ -440,12 +442,13 @@ class TestSendDiscover:
         mock_sock = MagicMock()
         src_mac = b"\x00\x11\x22\x33\x44\x55"
 
-        send_discover(mock_sock, src_mac)
+        xid = send_discover(mock_sock, src_mac)
 
         mock_sock.send.assert_called_once()
         sent_data = mock_sock.send.call_args[0][0]
         assert isinstance(sent_data, bytes)
         assert len(sent_data) > 20  # Has Ethernet + DCP headers
+        assert PNDCPHeader(EthernetHeader(sent_data).payload).xid == xid
 
 
 class TestSendRequest:
@@ -456,12 +459,33 @@ class TestSendRequest:
         mock_sock = MagicMock()
         src_mac = b"\x00\x11\x22\x33\x44\x55"
 
-        send_request(mock_sock, src_mac, PNDCPBlock.NAME_OF_STATION, b"test-device")
+        xid = send_request(mock_sock, src_mac, PNDCPBlock.NAME_OF_STATION, b"test-device")
 
         mock_sock.send.assert_called_once()
         sent_data = mock_sock.send.call_args[0][0]
         assert isinstance(sent_data, bytes)
         assert b"test-device" in sent_data
+        assert PNDCPHeader(EthernetHeader(sent_data).payload).xid == xid
+
+
+CONTROLLER_MAC = b"\x00\x11\x22\x33\x44\x55"
+DEVICE_MAC = b"\xaa\xbb\xcc\xdd\xee\xff"
+
+
+def _identify_response(xid, name=b"test-device"):
+    block = struct.pack(">BBHH", 2, 2, len(name) + 2, 0) + name
+    if len(block) % 2:
+        block += b"\x00"
+    response = PNDCPHeader(
+        DCP_IDENTIFY_RESPONSE_FRAME_ID,
+        PNDCPHeader.IDENTIFY,
+        PNDCPHeader.RESPONSE,
+        xid,
+        0,
+        len(block),
+        payload=block,
+    )
+    return bytes(EthernetHeader(CONTROLLER_MAC, DEVICE_MAC, PROFINET_ETHERTYPE, payload=response))
 
 
 class TestReadResponse:
@@ -475,6 +499,38 @@ class TestReadResponse:
         result = read_response(mock_sock, b"\x00\x11\x22\x33\x44\x55", timeout_sec=1)
 
         assert result == {}
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            # Alarm destination ref 1 looks like DCP RESPONSE; ack 0xffff looks like its length.
+            pytest.param(
+                bytes.fromhex("fe01 0001 0001 01 00 0000 ffff") + b"\x00" * 40,
+                id="alarm",
+            ),
+            pytest.param(bytes.fromhex("8000") + b"\x01" * 40, id="cyclic"),
+        ],
+    )
+    def test_ignores_non_dcp_frames(self, payload):
+        frame = bytes(
+            EthernetHeader(CONTROLLER_MAC, DEVICE_MAC, PROFINET_ETHERTYPE, payload=payload)
+        )
+        sock = MagicMock()
+        sock.recv.side_effect = [frame, _identify_response(1)]
+
+        result = read_response(sock, CONTROLLER_MAC, timeout_sec=1, once=True)
+
+        assert result == {
+            DEVICE_MAC: {PNDCPBlock.NAME_OF_STATION: b"test-device", "name": b"test-device"}
+        }
+
+    def test_ignores_stale_reply(self):
+        sock = MagicMock()
+        sock.recv.side_effect = [_identify_response(1, b"old-device"), _identify_response(2)]
+
+        result = read_response(sock, CONTROLLER_MAC, timeout_sec=1, once=True, expected_xid=2)
+
+        assert result[DEVICE_MAC]["name"] == b"test-device"
 
 
 class TestGetParam:

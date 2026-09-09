@@ -427,15 +427,6 @@ def _build_iocr_configs(
     return input_iocr, output_iocr
 
 
-def _process_io_slots(slots: List[IOSlot]) -> List[IOSlot]:
-    """Return only slots that carry cyclic process data.
-
-    Zero-input/zero-output submodules remain part of the discovered and
-    matched topology, but they are not members of the cyclic IOCRs.
-    """
-    return [slot for slot in slots if slot.input_length > 0 or slot.output_length > 0]
-
-
 def cmd_cyclic(args: argparse.Namespace) -> int:
     """Execute cyclic IO command."""
     from .cyclic import CyclicController
@@ -475,7 +466,15 @@ def cmd_cyclic(args: argparse.Namespace) -> int:
                 sub_assign.setdefault(slot_n, {})[subslot_n] = sub_id
 
         io_slots = gsdml_device.build_io_slots_from_device(device_slots)
-        process_io_slots = _process_io_slots(io_slots)
+        setup = IOCRSetup(
+            slots=io_slots,
+            send_clock_factor=32,
+            reduction_ratio=args.cycle_ms,
+            watchdog_factor=6,
+            data_hold_factor=6,
+            exclude_zero_io_submodules=getattr(args, "exclude_zero_io_submodules", False),
+        )
+        effective_io_slots = setup.slots
 
         print("Matching against GSDML...")
         total_in = 0
@@ -500,16 +499,8 @@ def cmd_cyclic(args: argparse.Namespace) -> int:
         time.sleep(0.5)
 
         cycle_ms = args.cycle_ms
-        send_clock_factor = 32
-        reduction_ratio = cycle_ms
-
-        setup = IOCRSetup(
-            slots=process_io_slots,
-            send_clock_factor=send_clock_factor,
-            reduction_ratio=reduction_ratio,
-            watchdog_factor=6,
-            data_hold_factor=6,
-        )
+        send_clock_factor = setup.send_clock_factor
+        reduction_ratio = setup.reduction_ratio
 
         conn = rpc.RPCCon(info)
 
@@ -545,7 +536,7 @@ def cmd_cyclic(args: argparse.Namespace) -> int:
 
         # Step 6: Build IOCRConfigs and start cyclic controller
         input_iocr, output_iocr = _build_iocr_configs(
-            process_io_slots,
+            effective_io_slots,
             result.input_frame_id,
             result.output_frame_id,
             send_clock_factor,
@@ -564,7 +555,7 @@ def cmd_cyclic(args: argparse.Namespace) -> int:
         )
 
         # Collect input data for display
-        input_slots = [(s.slot, s.subslot) for s in process_io_slots if s.input_length > 0]
+        input_slots = [(s.slot, s.subslot) for s in effective_io_slots if s.input_length > 0]
         latest_input: Dict[Tuple[int, int], bytes] = {}
 
         def on_input(slot: int, subslot: int, data: bytes) -> None:
@@ -766,6 +757,11 @@ def create_parser() -> argparse.ArgumentParser:
     sub.add_argument("--gsdml", required=True, help="Path to GSDML XML file")
     sub.add_argument("--cycle-ms", type=int, default=32, help="Cycle time in ms (default: 32)")
     sub.add_argument("--duration", type=int, default=0, help="Seconds to run (0 = until Ctrl+C)")
+    sub.add_argument(
+        "--exclude-zero-io-submodules",
+        action="store_true",
+        help="Exclude zero-I/O submodules (opt-in device interoperability workaround)",
+    )
     sub.add_argument(
         "--submodule",
         action="append",

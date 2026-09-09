@@ -13,7 +13,7 @@ import profinet.cli as cli
 import profinet.cyclic as cyclic_module
 import profinet.gsdml as gsdml_module
 from profinet.exceptions import DCPDeviceNotFoundError, PermissionDeniedError, RPCError
-from profinet.rpc import IOSlot
+from profinet.rpc import IOCRSetup, IOSlot
 from profinet.rt import IOCR_TYPE_INPUT, IOCR_TYPE_OUTPUT
 
 CTRL_MAC = b"\x00\x11\x22\x33\x44\x55"
@@ -326,8 +326,17 @@ class TestBuildIocrConfigs:
         assert output_iocr.data_length == 40
 
 
-class TestCyclicProcessIOSlots:
-    def test_cyclic_setup_and_runtime_use_process_io_only(self, net, monkeypatch):
+class TestCyclicTopologyPolicy:
+    @pytest.mark.parametrize(
+        ("exclude_zero_io_submodules", "expected_slots"),
+        [
+            (False, [(0, 0x8000), (0, 0x8001), (1, 1), (2, 1)]),
+            (True, [(1, 1), (2, 1)]),
+        ],
+    )
+    def test_cyclic_uses_one_effective_slot_set_for_setup_and_runtime(
+        self, net, monkeypatch, exclude_zero_io_submodules, expected_slots
+    ):
         topology_slots = [
             IOSlot(0, 0x8000, 0, 0, module_ident=1, submodule_ident=0x100),
             IOSlot(0, 0x8001, 0, 0, module_ident=1, submodule_ident=0x200),
@@ -364,6 +373,7 @@ class TestCyclicProcessIOSlots:
             submodule=None,
             cycle_ms=32,
             duration=1,
+            exclude_zero_io_submodules=exclude_zero_io_submodules,
         )
 
         assert cli.cmd_cyclic(args) == 0
@@ -371,7 +381,7 @@ class TestCyclicProcessIOSlots:
 
         setup = conn.connect.call_args_list[1].kwargs["iocr_setup"]
         assert setup.slots is not topology_slots
-        assert [(slot.slot, slot.subslot) for slot in setup.slots] == [(1, 1), (2, 1)]
+        assert [(slot.slot, slot.subslot) for slot in setup.slots] == expected_slots
         assert build_configs.call_args.args[0] is setup.slots
 
         input_iocr, output_iocr = (
@@ -380,3 +390,41 @@ class TestCyclicProcessIOSlots:
         )
         assert [(obj.slot, obj.subslot) for obj in input_iocr.objects] == [(1, 1)]
         assert [(obj.slot, obj.subslot) for obj in output_iocr.objects] == [(2, 1)]
+
+    def test_library_policy_defaults_to_complete_topology(self):
+        slots = [IOSlot(0, 0x8000), IOSlot(1, 1, input_length=8)]
+
+        setup = IOCRSetup(slots=slots)
+
+        assert [(slot.slot, slot.subslot) for slot in setup.slots] == [(0, 0x8000), (1, 1)]
+        assert setup.slots is not slots
+
+    def test_library_policy_excludes_only_zero_io_submodules_when_enabled(self):
+        slots = [
+            IOSlot(0, 0x8000),
+            IOSlot(1, 1, input_length=8),
+            IOSlot(2, 1, output_length=4),
+        ]
+
+        setup = IOCRSetup(slots=slots, exclude_zero_io_submodules=True)
+
+        assert [(slot.slot, slot.subslot) for slot in setup.slots] == [(1, 1), (2, 1)]
+
+    def test_cyclic_flag_is_opt_in(self):
+        parser = cli.create_parser()
+
+        default_args = parser.parse_args(["-i", "eth0", "cyclic", "dev", "--gsdml", "x.xml"])
+        opted_in_args = parser.parse_args(
+            [
+                "-i",
+                "eth0",
+                "cyclic",
+                "dev",
+                "--gsdml",
+                "x.xml",
+                "--exclude-zero-io-submodules",
+            ]
+        )
+
+        assert default_args.exclude_zero_io_submodules is False
+        assert opted_in_args.exclude_zero_io_submodules is True

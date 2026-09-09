@@ -472,7 +472,7 @@ def cmd_cyclic(args: argparse.Namespace) -> int:
             reduction_ratio=args.cycle_ms,
             watchdog_factor=6,
             data_hold_factor=6,
-            exclude_zero_io_submodules=getattr(args, "exclude_zero_io_submodules", False),
+            exclude_zero_io_submodules=args.exclude_zero_io_submodules,
         )
         effective_io_slots = setup.slots
 

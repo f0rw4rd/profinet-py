@@ -101,6 +101,9 @@ profinet -i eth0 cyclic device-name --gsdml device.xml
 
 # Custom cycle time
 profinet -i eth0 cyclic device-name --gsdml device.xml --cycle-ms 16
+
+# Exclude zero-I/O submodules (device interoperability workaround)
+profinet -i eth0 cyclic device-name --gsdml device.xml --exclude-zero-io-submodules
 ```
 
 ## Support

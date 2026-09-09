@@ -555,6 +555,14 @@ class IOCRSetup:
     """Data hold time = data_hold_factor * cycle_time.
     Default: 6 (matches watchdog for consistency)."""
 
+    exclude_zero_io_submodules: bool = False
+    """Exclude submodules with no input or output data from the AR.
+
+    The default keeps the complete discovered and matched topology in the
+    ExpectedSubmodule block and both IOCRs.  Enable this only for devices that
+    reject zero-I/O submodules during cyclic connection setup.
+    """
+
     @property
     def cycle_time_us(self) -> int:
         """Calculate cycle time in microseconds."""
@@ -586,7 +594,15 @@ class IOCRSetup:
         return warnings
 
     def __post_init__(self):
-        """Log warnings after initialization."""
+        """Apply the explicit topology policy and log configuration warnings."""
+        # Do not mutate a caller-owned list.  This is also the single policy
+        # boundary used by RPC ExpectedSubmodule, IOCR building, and runtime.
+        self.slots = list(self.slots)
+        if self.exclude_zero_io_submodules:
+            self.slots = [
+                slot for slot in self.slots if slot.input_length > 0 or slot.output_length > 0
+            ]
+
         for warning in self.validate():
             logger.warning(f"IOCRSetup: {warning}")
 

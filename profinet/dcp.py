@@ -768,6 +768,7 @@ def get_param(
     target: str,
     param: str,
     timeout_sec: int = 5,
+    strict_xid: bool = False,
 ) -> Optional[bytes]:
     """Read a parameter from a PROFINET device.
 
@@ -777,6 +778,7 @@ def get_param(
         target: Target device MAC address string
         param: Parameter name ("name" or "ip")
         timeout_sec: Timeout in seconds
+        strict_xid: Reject mismatched transaction IDs instead of accepting with a warning
 
     Returns:
         Parameter value as bytes, or None if not found
@@ -805,7 +807,9 @@ def get_param(
 
     sock.send(bytes(eth))
 
-    responses = read_response(sock, src, timeout_sec=timeout_sec, once=True)
+    responses = read_response(
+        sock, src, timeout_sec=timeout_sec, once=True, expected_xid=xid, strict_xid=strict_xid
+    )
     if responses:
         first_response = list(responses.values())[0]
         return first_response.get(param_tuple)
@@ -1142,6 +1146,9 @@ def send_discover(sock: socket, src: bytes, response_delay: int = 0x0080) -> int
         sock: Raw Ethernet socket
         src: Source MAC address (6 bytes)
         response_delay: Max response delay in 10ms units (default: 0x0080 = 1.28s)
+
+    Returns:
+        Transaction ID to pass to read_response as expected_xid
     """
     xid = _generate_xid()
 
@@ -1180,6 +1187,9 @@ def send_request(
         src: Source MAC address (6 bytes)
         block_type: (option, suboption) tuple to filter
         value: Filter value bytes
+
+    Returns:
+        Transaction ID to pass to read_response as expected_xid
     """
     xid = _generate_xid()
 
@@ -1212,8 +1222,12 @@ def read_response(
     once: bool = False,
     debug: bool = False,
     expected_xid: Optional[int] = None,
+    strict_xid: bool = False,
 ) -> Dict[bytes, Dict[Any, Any]]:
     """Read and parse DCP responses.
+
+    Lenient XID matching preserves compatibility with devices that echo incorrect
+    transaction IDs, but can accept stale replies. Enable strict_xid to reject them.
 
     Args:
         sock: Raw Ethernet socket
@@ -1221,7 +1235,8 @@ def read_response(
         timeout_sec: Maximum time to wait for responses
         once: If True, return after first response
         debug: If True, log debug information
-        expected_xid: If set, only accept responses matching this transaction ID
+        expected_xid: Transaction ID to check, or None to disable XID checking
+        strict_xid: Reject mismatched transaction IDs instead of accepting with a warning
 
     Returns:
         Dictionary mapping MAC addresses to parsed block data
@@ -1289,11 +1304,16 @@ def read_response(
 
                 # Validate transaction ID if specified
                 if expected_xid is not None and dcp.xid != expected_xid:
-                    logger.debug(
-                        f"Ignoring response with wrong XID "
+                    if strict_xid:
+                        logger.debug(
+                            f"Ignoring response with wrong XID "
+                            f"(got 0x{dcp.xid:08X}, expected 0x{expected_xid:08X})"
+                        )
+                        continue
+                    logger.warning(
+                        f"Accepting DCP response from {mac2s(eth.src)} with wrong XID "
                         f"(got 0x{dcp.xid:08X}, expected 0x{expected_xid:08X})"
                     )
-                    continue
 
                 # Parse DCP blocks
                 blocks = dcp.payload

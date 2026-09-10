@@ -60,6 +60,16 @@ class TestDiscover:
         run("discover")
         net.close.assert_called_once()
 
+    def test_discovery_checks_request_xid(self, net, monkeypatch):
+        from profinet.protocol import EthernetHeader, PNDCPHeader
+
+        read = MagicMock(return_value={})
+        monkeypatch.setattr(cli.dcp, "read_response", read)
+        assert run("discover") == 0
+        sent_xid = PNDCPHeader(EthernetHeader(net.send.call_args.args[0]).payload).xid
+        assert read.call_args.kwargs["expected_xid"] == sent_xid
+        assert read.call_args.kwargs.get("strict_xid", False) is False
+
 
 class TestGetParam:
     def test_name(self, net, monkeypatch, capsys):
@@ -327,6 +337,7 @@ class TestBuildIocrConfigs:
 
 
 class TestCyclicTopologyPolicy:
+    @pytest.mark.parametrize("fail_prm_end", [False, True])
     @pytest.mark.parametrize(
         ("exclude_zero_io_submodules", "expected_slots"),
         [
@@ -335,7 +346,7 @@ class TestCyclicTopologyPolicy:
         ],
     )
     def test_cyclic_uses_one_effective_slot_set_for_setup_and_runtime(
-        self, net, monkeypatch, exclude_zero_io_submodules, expected_slots
+        self, net, monkeypatch, exclude_zero_io_submodules, expected_slots, fail_prm_end
     ):
         topology_slots = [
             IOSlot(0, 0x8000, 0, 0, module_ident=1, submodule_ident=0x100),
@@ -350,6 +361,14 @@ class TestCyclicTopologyPolicy:
         info = SimpleNamespace(ip="192.168.0.10", mac="02:00:00:00:00:01")
         monkeypatch.setattr(cli.rpc, "get_station_info", MagicMock(return_value=info))
         conn = MagicMock()
+        listener = conn.create_alarm_listener.return_value
+
+        def prm_end():
+            listener.start.assert_called_once()
+            if fail_prm_end:
+                raise RuntimeError("PrmEnd failed")
+
+        conn.prm_end.side_effect = prm_end
         conn.discover_slots.return_value = topology_slots
         conn._socket.recvfrom.side_effect = TimeoutError
         conn.connect.side_effect = [
@@ -376,7 +395,15 @@ class TestCyclicTopologyPolicy:
             exclude_zero_io_submodules=exclude_zero_io_submodules,
         )
 
+        if fail_prm_end:
+            with pytest.raises(RuntimeError, match="PrmEnd failed"):
+                cli.cmd_cyclic(args)
+            listener.stop.assert_called_once()
+            return
+
         assert cli.cmd_cyclic(args) == 0
+        conn.create_alarm_listener.assert_called_once_with("eth0")
+        listener.stop.assert_called_once()
         assert len(topology_slots) == 4
 
         setup = conn.connect.call_args_list[1].kwargs["iocr_setup"]

@@ -654,8 +654,9 @@ class TestGetStationInfo:
                 with pytest.raises(DCPDeviceNotFoundError, match="not found"):
                     get_station_info(mock_sock, b"\x00\x11\x22\x33\x44\x55", "unknown-device")
 
+    @pytest.mark.parametrize("strict_xid", [False, True])
     @pytest.mark.parametrize("broadcast", [False, True], ids=["filtered", "broadcast"])
-    def test_get_station_info_found(self, broadcast):
+    def test_get_station_info_found(self, broadcast, strict_xid):
         """Test get_station_info returns device description."""
         mock_sock = MagicMock()
         mock_mac = b"\xaa\xbb\xcc\xdd\xee\xff"
@@ -674,16 +675,49 @@ class TestGetStationInfo:
             patch("profinet.rpc.dcp.send_discover", return_value=2) as discover,
             patch("profinet.rpc.dcp.read_response", side_effect=responses) as read,
         ):
-            info = get_station_info(mock_sock, b"\x00\x11\x22\x33\x44\x55", "found-device")
+            info = get_station_info(
+                mock_sock, b"\x00\x11\x22\x33\x44\x55", "found-device", strict_xid=strict_xid
+            )
 
         assert info.name == "found-device"
         assert info.ip == "192.168.1.100"
         assert read.call_args_list[0].kwargs["expected_xid"] == 1
+        assert all(call.kwargs["strict_xid"] is strict_xid for call in read.call_args_list)
         if broadcast:
             discover.assert_called_once_with(mock_sock, b"\x00\x11\x22\x33\x44\x55")
             assert read.call_args_list[1].kwargs["expected_xid"] == 2
         else:
             discover.assert_not_called()
+
+
+class TestCreateAlarmListener:
+    @pytest.mark.parametrize("alarm_enabled", [False, True])
+    @pytest.mark.parametrize("mac", ["aa:bb:cc:dd:ee:ff", b"\xaa\xbb\xcc\xdd\xee\xff"])
+    def test_factory_uses_connection_state_without_starting(self, alarm_enabled, mac):
+        info = DCPDeviceDescription(b"\xaa\xbb\xcc\xdd\xee\xff", {})
+        info.mac = mac
+        with (
+            patch("profinet.rpc.socket"),
+            patch("profinet.alarm_listener.ethernet_socket") as raw_socket,
+        ):
+            conn = RPCCon(info)
+            conn.src_mac = b"\x01" * 6
+            conn._alarm_cr_enabled = alarm_enabled
+            conn._alarm_ref = 7
+            conn._device_alarm_ref = 42
+            listener = conn.create_alarm_listener("eth0")
+            if alarm_enabled:
+                assert listener.endpoint.interface == "eth0"
+                assert listener.endpoint.controller_ref == 7
+                assert listener.endpoint.device_ref == 42
+                assert listener.endpoint.device_mac == b"\xaa\xbb\xcc\xdd\xee\xff"
+                assert listener.endpoint.transport == 0
+                assert listener.controller_mac == conn.src_mac
+                assert not listener.is_running
+            else:
+                assert listener is None
+            raw_socket.assert_not_called()
+            conn.close()
 
 
 from profinet.rpc import (

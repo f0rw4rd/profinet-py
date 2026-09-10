@@ -57,8 +57,10 @@ def cmd_discover(args: argparse.Namespace) -> int:
         src = get_mac(args.interface)
 
         print(f"Discovering PROFINET devices on {args.interface}...")
-        dcp.send_discover(sock, src)
-        responses = dcp.read_response(sock, src, timeout_sec=args.timeout, debug=args.verbose)
+        xid = dcp.send_discover(sock, src)
+        responses = dcp.read_response(
+            sock, src, timeout_sec=args.timeout, debug=args.verbose, expected_xid=xid
+        )
 
         if not responses:
             print("No devices found")
@@ -429,7 +431,6 @@ def _build_iocr_configs(
 
 def cmd_cyclic(args: argparse.Namespace) -> int:
     """Execute cyclic IO command."""
-    from .alarm_listener import AlarmEndpoint, AlarmListener
     from .cyclic import CyclicController
     from .gsdml import load_gsdml
 
@@ -522,14 +523,8 @@ def cmd_cyclic(args: argparse.Namespace) -> int:
             conn.close()
             return 1
 
-        if conn._alarm_cr_enabled:
-            endpoint = AlarmEndpoint(
-                interface=args.interface,
-                controller_ref=conn._alarm_ref,
-                device_ref=conn._device_alarm_ref,
-                device_mac=s2mac(info.mac),
-            )
-            alarm_listener = AlarmListener(endpoint, src)
+        alarm_listener = conn.create_alarm_listener(args.interface)
+        if alarm_listener is not None:
             alarm_listener.start()
 
         # Step 5: Parameter phase and ApplicationReady

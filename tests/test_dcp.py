@@ -399,7 +399,7 @@ class TestPARAMS:
         assert PARAMS["ip"] == PNDCPBlock.IP_ADDRESS
 
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from profinet.dcp import (
     DCP_MULTICAST_MAC,
@@ -528,13 +528,35 @@ class TestReadResponse:
         sock = MagicMock()
         sock.recv.side_effect = [_identify_response(1, b"old-device"), _identify_response(2)]
 
-        result = read_response(sock, CONTROLLER_MAC, timeout_sec=1, once=True, expected_xid=2)
+        result = read_response(
+            sock, CONTROLLER_MAC, timeout_sec=1, once=True, expected_xid=2, strict_xid=True
+        )
 
         assert result[DEVICE_MAC]["name"] == b"test-device"
+
+    @pytest.mark.parametrize("xid", [0, 1])
+    def test_accepts_wrong_xid_by_default(self, xid, caplog):
+        sock = MagicMock()
+        sock.recv.return_value = _identify_response(xid)
+        result = read_response(sock, CONTROLLER_MAC, once=True, expected_xid=2)
+        assert result[DEVICE_MAC]["name"] == b"test-device"
+        assert len(caplog.records) == 1
+        assert "aa:bb:cc:dd:ee:ff" in caplog.text.lower()
+        assert f"got 0x{xid:08X}, expected 0x00000002" in caplog.text
 
 
 class TestGetParam:
     """Test get_param function."""
+
+    @pytest.mark.parametrize("strict_xid", [False, True])
+    def test_get_param_forwards_xid(self, strict_xid):
+        sock = MagicMock()
+        with patch("profinet.dcp.read_response", return_value={}) as read:
+            get_param(sock, CONTROLLER_MAC, "aa:bb:cc:dd:ee:ff", "name", strict_xid=strict_xid)
+        xid = PNDCPHeader(EthernetHeader(sock.send.call_args.args[0]).payload).xid
+        read.assert_called_once_with(
+            sock, CONTROLLER_MAC, timeout_sec=5, once=True, expected_xid=xid, strict_xid=strict_xid
+        )
 
     def test_get_param_invalid_param(self):
         """Test get_param raises error for invalid parameter."""

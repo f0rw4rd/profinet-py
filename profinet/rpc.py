@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import construct as cs
 
 from . import blocks, dcp, indices
+from .alarm_listener import AlarmEndpoint, AlarmListener
 from .blocks import (
     ExpectedSubmoduleBlockReq,
     IODWriteMultipleBuilder,
@@ -72,6 +73,7 @@ from .protocol import (
     PNNRDData,
     PNRPCHeader,
 )
+from .util import s2mac
 
 # =============================================================================
 # Data Classes for Parsed Records
@@ -555,6 +557,14 @@ class IOCRSetup:
     """Data hold time = data_hold_factor * cycle_time.
     Default: 6 (matches watchdog for consistency)."""
 
+    exclude_zero_io_submodules: bool = False
+    """Exclude submodules with no input or output data from the AR.
+
+    The default keeps the complete discovered and matched topology in the
+    ExpectedSubmodule block and both IOCRs.  Enable this only for devices that
+    reject zero-I/O submodules during cyclic connection setup.
+    """
+
     @property
     def cycle_time_us(self) -> int:
         """Calculate cycle time in microseconds."""
@@ -586,7 +596,15 @@ class IOCRSetup:
         return warnings
 
     def __post_init__(self):
-        """Log warnings after initialization."""
+        """Apply the explicit topology policy and log configuration warnings."""
+        # Do not mutate a caller-owned list.  This is also the single policy
+        # boundary used by RPC ExpectedSubmodule, IOCR building, and runtime.
+        self.slots = list(self.slots)
+        if self.exclude_zero_io_submodules:
+            self.slots = [
+                slot for slot in self.slots if slot.input_length > 0 or slot.output_length > 0
+            ]
+
         for warning in self.validate():
             logger.warning(f"IOCRSetup: {warning}")
 
@@ -844,6 +862,7 @@ def get_station_info(
     src: bytes,
     name: str,
     timeout_sec: int = 10,
+    strict_xid: bool = False,
 ) -> dcp.DCPDeviceDescription:
     """Get device information by station name.
 
@@ -855,6 +874,7 @@ def get_station_info(
         src: Source MAC address (6 bytes)
         name: PROFINET station name
         timeout_sec: Discovery timeout in seconds
+        strict_xid: Reject mismatched transaction IDs instead of accepting with a warning
 
     Returns:
         DCPDeviceDescription for the device
@@ -863,15 +883,19 @@ def get_station_info(
         DCPDeviceNotFoundError: If device not found
     """
     # Try filtered identify-by-name first
-    dcp.send_request(sock, src, PNDCPBlock.NAME_OF_STATION, bytes(name, "utf-8"))
-    responses = dcp.read_response(sock, src, timeout_sec=timeout_sec, once=True)
+    xid = dcp.send_request(sock, src, PNDCPBlock.NAME_OF_STATION, bytes(name, "utf-8"))
+    responses = dcp.read_response(
+        sock, src, timeout_sec=timeout_sec, once=True, expected_xid=xid, strict_xid=strict_xid
+    )
 
     if not responses:
         # Some devices don't respond to filtered identify requests.
         # Fall back to broadcast discover and filter by name.
         logger.debug("Filtered identify failed, falling back to broadcast discover")
-        dcp.send_discover(sock, src)
-        responses = dcp.read_response(sock, src, timeout_sec=timeout_sec)
+        xid = dcp.send_discover(sock, src)
+        responses = dcp.read_response(
+            sock, src, timeout_sec=timeout_sec, expected_xid=xid, strict_xid=strict_xid
+        )
 
         # Filter by name
         for mac, blocks in responses.items():
@@ -1020,6 +1044,26 @@ class RPCCon:
             len(payload),  # actual_count
             payload=payload,
         )
+
+    def create_alarm_listener(self, interface: str) -> Optional[AlarmListener]:
+        """Create an unstarted Layer 2 listener, or None if AlarmCR is not established.
+
+        Register callbacks before starting the listener. The caller owns its
+        lifecycle and must stop it when done with the connection.
+        """
+        if not self._alarm_cr_enabled:
+            return None
+
+        device_mac = self.info.mac
+        if isinstance(device_mac, str):
+            device_mac = s2mac(device_mac)
+        endpoint = AlarmEndpoint(
+            interface=interface,
+            controller_ref=self._alarm_ref,
+            device_ref=self._device_alarm_ref,
+            device_mac=device_mac,
+        )
+        return AlarmListener(endpoint, self.src_mac)
 
     def _build_alarm_cr_block(
         self,

@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 import construct as cs
 
 from . import dcp, indices
-from .alarm_listener import AlarmEndpoint, AlarmListener
+from .alarm_listener import AlarmListener
 from .alarms import AlarmNotification, parse_alarm_notification
 from .blocks import (
     ModuleDiffBlock,
@@ -126,8 +126,10 @@ class scan:
         src_mac = get_mac(self.interface)
 
         try:
-            send_discover(sock, src_mac)
-            responses = read_response(sock, src_mac, timeout_sec=int(self.timeout))
+            xid = send_discover(sock, src_mac)
+            responses = read_response(
+                sock, src_mac, timeout_sec=int(self.timeout), expected_xid=xid
+            )
 
             devices = []
             for mac, blocks in responses.items():
@@ -368,8 +370,8 @@ class ProfinetDevice:
                 # Discovery by MAC address
                 from .dcp import read_response, send_discover
 
-                send_discover(sock, src_mac)
-                responses = read_response(sock, src_mac, timeout_sec=int(timeout))
+                xid = send_discover(sock, src_mac)
+                responses = read_response(sock, src_mac, timeout_sec=int(timeout), expected_xid=xid)
 
                 for mac, blocks in responses.items():
                     if mac == target_mac:
@@ -414,8 +416,8 @@ class ProfinetDevice:
             # Discover all devices, filter by IP
             from .dcp import read_response, send_discover
 
-            send_discover(sock, src_mac)
-            responses = read_response(sock, src_mac, timeout_sec=int(timeout))
+            xid = send_discover(sock, src_mac)
+            responses = read_response(sock, src_mac, timeout_sec=int(timeout), expected_xid=xid)
 
             for mac, blocks in responses.items():
                 device = dcp.DCPDeviceDescription(mac, blocks)
@@ -1075,23 +1077,10 @@ class ProfinetDevice:
         if not self._connected or not self._rpc:
             raise RuntimeError("Must be connected first")
 
-        if not self._rpc._alarm_cr_enabled:
+        listener = self._rpc.create_alarm_listener(self._interface)
+        if listener is None:
             raise RuntimeError("AlarmCR not established. Reconnect with with_alarm_cr=True")
-
-        # Create endpoint from RPC state
-        device_mac = self._info.mac
-        if isinstance(device_mac, str):
-            device_mac = s2mac(device_mac)
-
-        endpoint = AlarmEndpoint(
-            interface=self._interface,
-            controller_ref=self._rpc._alarm_ref,
-            device_ref=self._rpc._device_alarm_ref,
-            device_mac=device_mac,
-            transport=0,  # Layer 2
-        )
-
-        self._alarm_listener = AlarmListener(endpoint, self._src_mac)
+        self._alarm_listener = listener
 
         # Add existing callbacks
         for callback in self._alarm_callbacks:

@@ -59,7 +59,12 @@ def cmd_discover(args: argparse.Namespace) -> int:
         print(f"Discovering PROFINET devices on {args.interface}...")
         xid = dcp.send_discover(sock, src)
         responses = dcp.read_response(
-            sock, src, timeout_sec=args.timeout, debug=args.verbose, expected_xid=xid
+            sock,
+            src,
+            timeout_sec=args.timeout,
+            debug=args.verbose,
+            expected_xid=xid,
+            strict_xid=args.strict_xid,
         )
 
         if not responses:
@@ -652,6 +657,13 @@ def create_parser() -> argparse.ArgumentParser:
 
     # discover
     sub = subparsers.add_parser("discover", help="Discover PROFINET devices")
+    sub.add_argument(
+        "--strict-xid",
+        action="store_true",
+        help="Drop responses whose transaction ID does not match the request. "
+        "Rejects stale and foreign replies, but hides devices that do not echo "
+        "the transaction ID correctly.",
+    )
     sub.set_defaults(func=cmd_discover)
 
     # get-param

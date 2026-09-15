@@ -13,7 +13,7 @@ import pytest
 
 from profinet import indices
 from profinet.device import ProfinetDevice, WriteItem
-from profinet.exceptions import RPCError
+from profinet.exceptions import DCPDeviceNotFoundError, RPCError
 from profinet.protocol import PNDCPBlock
 
 CTRL_MAC = b"\x00\x11\x22\x33\x44\x55"
@@ -314,5 +314,28 @@ def test_discovery_checks_request_xid(entry):
         assert devices[0].name == "dev"
         sock = ethernet.return_value
         sent_xid = PNDCPHeader(EthernetHeader(sock.send.call_args.args[0]).payload).xid
-        read.assert_called_once_with(sock, CTRL_MAC, timeout_sec=3, expected_xid=sent_xid)
+        read.assert_called_once_with(
+            sock, CTRL_MAC, timeout_sec=3, expected_xid=sent_xid, strict_xid=False
+        )
         sock.close.assert_called_once()
+
+
+@pytest.mark.parametrize("entry", ["scan", "mac", "ip"])
+def test_strict_xid_is_forwarded(entry):
+    """strict_xid must reach read_response; it defaults off and is opt-in."""
+    from profinet.device import scan
+
+    with (
+        patch("profinet.device.ethernet_socket"),
+        patch("profinet.device.get_mac", return_value=CTRL_MAC),
+        patch("profinet.dcp.read_response", return_value={}) as read,
+    ):
+        if entry == "scan":
+            list(scan("eth0", timeout=3, strict_xid=True))
+        elif entry == "mac":
+            with pytest.raises(DCPDeviceNotFoundError):
+                ProfinetDevice.discover("02:00:00:00:00:01", "eth0", timeout=3, strict_xid=True)
+        else:
+            with pytest.raises(DCPDeviceNotFoundError):
+                ProfinetDevice.from_ip("192.168.0.10", "eth0", timeout=3, strict_xid=True)
+        assert read.call_args.kwargs["strict_xid"] is True

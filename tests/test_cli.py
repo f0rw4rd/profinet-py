@@ -75,6 +75,12 @@ class TestDiscover:
         assert read.call_args.kwargs["expected_xid"] == sent_xid
         assert read.call_args.kwargs.get("strict_xid", False) is False
 
+    def test_strict_xid_flag_is_forwarded(self, net, monkeypatch):
+        read = MagicMock(return_value={})
+        monkeypatch.setattr(cli.dcp, "read_response", read)
+        assert run("discover", "--strict-xid") == 0
+        assert read.call_args.kwargs["strict_xid"] is True
+
 
 class TestGetParam:
     def test_name(self, net, monkeypatch, capsys):

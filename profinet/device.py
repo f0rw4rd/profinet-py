@@ -100,6 +100,10 @@ class scan:
     Args:
         interface: Network interface name (default: "eth0")
         timeout: Discovery timeout in seconds
+        strict_xid: Drop responses whose transaction ID does not match the
+            request instead of accepting them with a warning. Rejects stale
+            and foreign replies, but some devices do not echo the XID
+            correctly and will disappear from the results.
 
     Raises:
         PermissionDeniedError: If no root/CAP_NET_RAW
@@ -113,9 +117,10 @@ class scan:
         >>> devices = list(scan("eth0"))
     """
 
-    def __init__(self, interface: str = "eth0", timeout: float = 3.0):
+    def __init__(self, interface: str = "eth0", timeout: float = 3.0, strict_xid: bool = False):
         self.interface = interface
         self.timeout = timeout
+        self.strict_xid = strict_xid
         self._devices: Optional[List[ProfinetDevice]] = None
 
     def _discover(self) -> List[ProfinetDevice]:
@@ -128,7 +133,11 @@ class scan:
         try:
             xid = send_discover(sock, src_mac)
             responses = read_response(
-                sock, src_mac, timeout_sec=int(self.timeout), expected_xid=xid
+                sock,
+                src_mac,
+                timeout_sec=int(self.timeout),
+                expected_xid=xid,
+                strict_xid=self.strict_xid,
             )
 
             devices = []
@@ -159,12 +168,16 @@ class scan:
         return self._devices[index]
 
 
-def scan_dict(interface: str = "eth0", timeout: float = 3.0) -> Dict[str, DeviceInfo]:
+def scan_dict(
+    interface: str = "eth0", timeout: float = 3.0, strict_xid: bool = False
+) -> Dict[str, DeviceInfo]:
     """Scan network and return device info dictionary.
 
     Args:
         interface: Network interface name
         timeout: Discovery timeout in seconds
+        strict_xid: Drop responses whose transaction ID does not match the
+            request instead of accepting them with a warning.
 
     Returns:
         Dict mapping device name to DeviceInfo
@@ -175,7 +188,7 @@ def scan_dict(interface: str = "eth0", timeout: float = 3.0) -> Dict[str, Device
         >>> print(devices["my-device"].ip)
     """
     result = {}
-    for dev in scan(interface, timeout):
+    for dev in scan(interface, timeout, strict_xid=strict_xid):
         info = dev._info
         result[dev.name] = DeviceInfo(
             name=dev.name,
@@ -337,6 +350,7 @@ class ProfinetDevice:
         identifier: str,
         interface: str,
         timeout: float = 10.0,
+        strict_xid: bool = False,
     ) -> ProfinetDevice:
         """Discover device by station name or MAC address.
 
@@ -345,6 +359,10 @@ class ProfinetDevice:
                        (e.g., "my-device" or "00:0c:29:ab:cd:ef")
             interface: Network interface name (e.g., "eth0")
             timeout: Discovery timeout in seconds
+            strict_xid: Drop responses whose transaction ID does not match the
+                request instead of accepting them with a warning. Rejects stale
+                and foreign replies, but some devices do not echo the XID
+                correctly and will not be found.
 
         Returns:
             ProfinetDevice instance (not yet connected)
@@ -371,7 +389,13 @@ class ProfinetDevice:
                 from .dcp import read_response, send_discover
 
                 xid = send_discover(sock, src_mac)
-                responses = read_response(sock, src_mac, timeout_sec=int(timeout), expected_xid=xid)
+                responses = read_response(
+                    sock,
+                    src_mac,
+                    timeout_sec=int(timeout),
+                    expected_xid=xid,
+                    strict_xid=strict_xid,
+                )
 
                 for mac, blocks in responses.items():
                     if mac == target_mac:
@@ -381,7 +405,9 @@ class ProfinetDevice:
                 raise DCPDeviceNotFoundError(f"Device with MAC '{identifier}' not found")
             else:
                 # Discovery by name
-                info = get_station_info(sock, src_mac, identifier, timeout_sec=int(timeout))
+                info = get_station_info(
+                    sock, src_mac, identifier, timeout_sec=int(timeout), strict_xid=strict_xid
+                )
                 return cls(info, interface, src_mac, timeout=timeout)
         finally:
             sock.close()
@@ -392,6 +418,7 @@ class ProfinetDevice:
         ip: str,
         interface: str,
         timeout: float = 10.0,
+        strict_xid: bool = False,
     ) -> ProfinetDevice:
         """Connect to device by IP address.
 
@@ -401,6 +428,10 @@ class ProfinetDevice:
             ip: Device IP address
             interface: Network interface name
             timeout: Discovery timeout in seconds
+            strict_xid: Drop responses whose transaction ID does not match the
+                request instead of accepting them with a warning. Rejects stale
+                and foreign replies, but some devices do not echo the XID
+                correctly and will not be found.
 
         Returns:
             ProfinetDevice instance (not yet connected)
@@ -417,7 +448,13 @@ class ProfinetDevice:
             from .dcp import read_response, send_discover
 
             xid = send_discover(sock, src_mac)
-            responses = read_response(sock, src_mac, timeout_sec=int(timeout), expected_xid=xid)
+            responses = read_response(
+                sock,
+                src_mac,
+                timeout_sec=int(timeout),
+                expected_xid=xid,
+                strict_xid=strict_xid,
+            )
 
             for mac, blocks in responses.items():
                 device = dcp.DCPDeviceDescription(mac, blocks)

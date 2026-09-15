@@ -7,13 +7,14 @@ data building (I&M writes), validation, and connection state handling.
 
 import struct
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 from profinet import indices
 from profinet.device import ProfinetDevice, WriteItem
 from profinet.exceptions import RPCError
+from profinet.protocol import PNDCPBlock
 
 CTRL_MAC = b"\x00\x11\x22\x33\x44\x55"
 
@@ -237,23 +238,22 @@ class TestAlarmListenerGuards:
 
     def test_requires_alarm_cr(self):
         device = make_connected_device()
-        device._rpc._alarm_cr_enabled = False
+        device._rpc.create_alarm_listener.return_value = None
         with pytest.raises(RuntimeError, match="AlarmCR"):
             device.start_alarm_listener()
 
     def test_start_and_running_property(self):
         device = make_connected_device()
-        device._rpc._alarm_cr_enabled = True
-        device._rpc._alarm_ref = 1
-        device._rpc._device_alarm_ref = 42
-        with patch("profinet.device.AlarmListener") as listener_cls:
-            listener_cls.return_value.is_running = True
-            device.on_alarm(lambda a: None)
-            device.start_alarm_listener()
-            assert device.alarm_listener_running is True
-            listener_cls.return_value.start.assert_called_once()
-            listener_cls.return_value.add_callback.assert_called_once()
+        listener = device._rpc.create_alarm_listener.return_value
+        listener.is_running = True
+        callback = lambda a: None  # noqa: E731
+        device.on_alarm(callback)
+        device.start_alarm_listener()
+        device._rpc.create_alarm_listener.assert_called_once_with("eth0")
+        assert device.alarm_listener_running is True
+        assert listener.mock_calls == [call.add_callback(callback), call.start()]
         device.stop_alarm_listener()
+        listener.stop.assert_called_once()
         assert device._alarm_listener is None
 
     def test_on_alarm_forwards_to_running_listener(self):
@@ -288,3 +288,31 @@ class TestGetInfo:
         with patch("profinet.device.epm_lookup", return_value=[]):
             info = device.get_info(include_topology=True)
         assert info.topology == "topo"
+
+
+@pytest.mark.parametrize("entry", ["scan", "mac", "ip"])
+def test_discovery_checks_request_xid(entry):
+    from profinet.device import scan
+    from profinet.protocol import EthernetHeader, PNDCPHeader
+
+    mac = b"\x02\x00\x00\x00\x00\x01"
+    blocks = {
+        PNDCPBlock.NAME_OF_STATION: b"dev",
+        PNDCPBlock.IP_ADDRESS: b"\xc0\xa8\x00\x0a" + b"\x00" * 8,
+    }
+    with (
+        patch("profinet.device.ethernet_socket") as ethernet,
+        patch("profinet.device.get_mac", return_value=CTRL_MAC),
+        patch("profinet.dcp.read_response", return_value={mac: blocks}) as read,
+    ):
+        if entry == "scan":
+            devices = list(scan("eth0", timeout=3))
+        elif entry == "mac":
+            devices = [ProfinetDevice.discover("02:00:00:00:00:01", "eth0", timeout=3)]
+        else:
+            devices = [ProfinetDevice.from_ip("192.168.0.10", "eth0", timeout=3)]
+        assert devices[0].name == "dev"
+        sock = ethernet.return_value
+        sent_xid = PNDCPHeader(EthernetHeader(sock.send.call_args.args[0]).payload).xid
+        read.assert_called_once_with(sock, CTRL_MAC, timeout_sec=3, expected_xid=sent_xid)
+        sock.close.assert_called_once()

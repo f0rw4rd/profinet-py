@@ -32,10 +32,10 @@ try:
     print(f"Discovering PROFINET devices on {INTERFACE}...\n")
 
     # Send DCP discover broadcast - finds ALL devices, no name needed
-    send_discover(sock, src_mac)
+    xid = send_discover(sock, src_mac)
 
     # Read responses (wait 3 seconds)
-    responses = read_response(sock, src_mac, timeout_sec=3)
+    responses = read_response(sock, src_mac, timeout_sec=3, expected_xid=xid)
 
     print(f"Found {len(responses)} device(s):\n")
 

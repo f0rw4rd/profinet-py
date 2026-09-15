@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "profinet-py"
-version = "0.6.3"
+version = "0.6.4"
 description = "PROFINET IO-Controller library for Python"
 readme = "README.md"
 license = {text = "GPL-3.0-only"}

@@ -7,7 +7,7 @@ name = "profinet-py"
 version = "0.6.3"
 description = "PROFINET IO-Controller library for Python"
 readme = "README.md"
-license = "GPL-3.0-only"
+license = {text = "GPL-3.0-only"}
 requires-python = ">=3.10"
 authors = [
     {name = "f0rw4rd"},

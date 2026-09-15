@@ -78,11 +78,17 @@ sock = ethernet_socket("eth0")
 src_mac = get_mac("eth0")
 
 # Discover PROFINET devices
-send_discover(sock, src_mac)
-responses = read_response(sock, src_mac, timeout_sec=5)
+xid = send_discover(sock, src_mac)
+responses = read_response(sock, src_mac, timeout_sec=5, expected_xid=xid)
 
 sock.close()
 ```
+
+DCP discovery and GET accept incorrect transaction IDs (XIDs) with a warning by
+default for compatibility with devices that echo wrong or zero XIDs. This can
+accept stale replies. Pass `strict_xid=True` to `read_response()` (with
+`expected_xid`), `get_param()`, or `get_station_info()` to reject mismatches.
+CLI and high-level device discovery use lenient defaults.
 
 ### CLI
 
@@ -101,6 +107,9 @@ profinet -i eth0 cyclic device-name --gsdml device.xml
 
 # Custom cycle time
 profinet -i eth0 cyclic device-name --gsdml device.xml --cycle-ms 16
+
+# Exclude zero-I/O submodules (device interoperability workaround)
+profinet -i eth0 cyclic device-name --gsdml device.xml --exclude-zero-io-submodules
 ```
 
 ## Support

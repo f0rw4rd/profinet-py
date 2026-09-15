@@ -27,8 +27,8 @@ is_mac = bool(re.match(r"^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$", DEVICE))
 try:
     if is_mac:
         # Discover all and find by MAC
-        send_discover(sock, src_mac)
-        responses = read_response(sock, src_mac, timeout_sec=3)
+        xid = send_discover(sock, src_mac)
+        responses = read_response(sock, src_mac, timeout_sec=3, expected_xid=xid)
         mac_normalized = DEVICE.lower().replace("-", ":")
         info = None
         for mac, blocks in responses.items():

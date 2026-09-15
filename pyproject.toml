@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "profinet-py"
-version = "0.6.4"
+dynamic = ["version"]
 description = "PROFINET IO-Controller library for Python"
 readme = "README.md"
 license = {text = "GPL-3.0-only"}
@@ -59,6 +59,9 @@ Issues = "https://github.com/f0rw4rd/profinet-py/issues"
 
 [project.scripts]
 profinet = "profinet.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "profinet.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["."]

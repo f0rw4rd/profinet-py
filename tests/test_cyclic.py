@@ -827,17 +827,14 @@ class TestBuildIOCRConfigs:
 
 
 class TestVersion:
-    """Test version string matches pyproject.toml."""
+    """Test the version string is well-formed."""
 
-    def test_version_matches_pyproject(self):
-        """__version__ must stay in sync with pyproject.toml."""
+    def test_version_is_sane(self):
+        """profinet.__version__ is the single source of truth (pyproject reads it via
+        [tool.setuptools.dynamic]), so there is nothing to cross-check -- just guard
+        the shape, since setuptools must be able to parse it as a version."""
         import re
-        from pathlib import Path
 
         import profinet
 
-        # re instead of tomllib: the test matrix still includes Python 3.10
-        pyproject = (Path(__file__).parent.parent / "pyproject.toml").read_text()
-        match = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE)
-        assert match is not None
-        assert profinet.__version__ == match.group(1)
+        assert re.fullmatch(r"\d+\.\d+\.\d+", profinet.__version__)

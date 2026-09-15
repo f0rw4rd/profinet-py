@@ -12,7 +12,12 @@ import pytest
 import profinet.cli as cli
 import profinet.cyclic as cyclic_module
 import profinet.gsdml as gsdml_module
-from profinet.exceptions import DCPDeviceNotFoundError, PermissionDeniedError, RPCError
+from profinet.exceptions import (
+    DCPDeviceNotFoundError,
+    PermissionDeniedError,
+    RPCError,
+    ValidationError,
+)
 from profinet.rpc import IOCRSetup, IOSlot
 from profinet.rt import IOCR_TYPE_INPUT, IOCR_TYPE_OUTPUT
 
@@ -436,6 +441,17 @@ class TestCyclicTopologyPolicy:
         setup = IOCRSetup(slots=slots, exclude_zero_io_submodules=True)
 
         assert [(slot.slot, slot.subslot) for slot in setup.slots] == [(1, 1), (2, 1)]
+
+    def test_library_policy_rejects_a_topology_it_would_empty(self):
+        slots = [IOSlot(0, 0x8000), IOSlot(0, 0x8001)]
+
+        with pytest.raises(ValidationError, match="removed all 2 submodule"):
+            IOCRSetup(slots=slots, exclude_zero_io_submodules=True)
+
+    def test_library_policy_still_allows_an_already_empty_topology(self):
+        setup = IOCRSetup(slots=[], exclude_zero_io_submodules=True)
+
+        assert setup.slots == []
 
     def test_cyclic_flag_is_opt_in(self):
         parser = cli.create_parser()

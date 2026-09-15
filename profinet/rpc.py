@@ -42,6 +42,7 @@ from .exceptions import (
     RPCError,
     RPCFaultError,
     RPCTimeoutError,
+    ValidationError,
 )
 from .protocol import (
     IOCRAPIObject,
@@ -563,6 +564,10 @@ class IOCRSetup:
     The default keeps the complete discovered and matched topology in the
     ExpectedSubmodule block and both IOCRs.  Enable this only for devices that
     reject zero-I/O submodules during cyclic connection setup.
+
+    Note that the DAP, interface and port submodules carry no I/O data, so they
+    are excluded too; devices that require them in the AR will refuse to
+    connect.  Raises ValidationError if the exclusion would empty the topology.
     """
 
     @property
@@ -601,9 +606,20 @@ class IOCRSetup:
         # boundary used by RPC ExpectedSubmodule, IOCR building, and runtime.
         self.slots = list(self.slots)
         if self.exclude_zero_io_submodules:
+            discovered = len(self.slots)
             self.slots = [
                 slot for slot in self.slots if slot.input_length > 0 or slot.output_length > 0
             ]
+            if discovered and not self.slots:
+                # An AR with no submodules at all cannot be established: the
+                # ExpectedSubmodule block would carry zero APIs and both IOCRs
+                # zero data objects.  Fail here rather than at CONNECT, where
+                # the device just rejects the AR with no indication why.
+                raise ValidationError(
+                    f"exclude_zero_io_submodules removed all {discovered} submodule(s): "
+                    "the device reports no submodule with input or output data. "
+                    "Disable the exclusion to connect to this device."
+                )
 
         for warning in self.validate():
             logger.warning(f"IOCRSetup: {warning}")

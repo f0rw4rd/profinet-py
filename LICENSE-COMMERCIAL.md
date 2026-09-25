@@ -24,5 +24,5 @@ A commercial license is required if you want to:
 
 ## Contact
 
-For commercial licensing inquiries, contact the maintainer via the details listed
-at <https://github.com/f0rw4rd>.
+For commercial licensing inquiries, contact the maintainer at
+<https://quellsec.dev/#support>.

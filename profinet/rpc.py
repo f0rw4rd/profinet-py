@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import construct as cs
 
 from . import blocks, dcp, indices
+from .rt import _iter_iocr_layout
 from .alarm_listener import AlarmEndpoint, AlarmListener
 from .blocks import (
     ExpectedSubmoduleBlockReq,
@@ -489,6 +490,8 @@ class IOSlot:
     submodule_ident: int = 0
     """Submodule identification number (from device discovery)."""
 
+    api: int = 0
+    """API number """
 
 # Minimum recommended cycle time for Python (due to GIL and OS scheduling)
 PYTHON_MIN_CYCLE_TIME_MS = 8
@@ -1149,6 +1152,11 @@ class RPCCon:
         Input IOCR: device -> controller
         Output IOCR: controller -> device
 
+        IODataObjects carry this direction's data and IOPS; IOCS acknowledges
+        the opposite direction's provider. Bidirectional submodules have both.
+        No-I/O submodules provide zero-length input data with IOPS and receive
+        IOCS in the output IOCR. All data/IOPS precedes IOCS in the frame.
+
         Args:
             iocr_type: 1=Input, 2=Output
             iocr_reference: Local IOCR reference number
@@ -1157,57 +1165,24 @@ class RPCCon:
         Returns:
             Serialized IOCRBlockReq bytes
         """
-        # Calculate frame offset for each slot
-        # Each IO data object: data + IOPS byte
-        objects_data = b""
+        api_entries = {slot.api: {"objects": [], "iocs": []} for slot in setup.slots}
         frame_offset = 0
 
-        for slot in setup.slots:
-            if iocr_type == 1:  # Input IOCR
-                data_len = slot.input_length
-            else:  # Output IOCR
-                data_len = slot.output_length
-
-            if data_len > 0:
-                obj = IOCRAPIObject(
-                    slot_number=slot.slot,
-                    subslot_number=slot.subslot,
-                    frame_offset=frame_offset,
+        for slot, data_len, object_offset, is_iocs in _iter_iocr_layout(setup.slots, iocr_type):
+            object_kind = "iocs" if is_iocs else "objects"
+            api_entries[slot.api][object_kind].append(
+                bytes(
+                    IOCRAPIObject(
+                        slot_number=slot.slot,
+                        subslot_number=slot.subslot,
+                        frame_offset=object_offset,
+                    )
                 )
-                objects_data += bytes(obj)
-                frame_offset += data_len + 1  # data + IOPS
-
-        # Build IOCS objects (consumer status) per IEC 61158-6-10.
-        # Every submodule in ExpectedSubmodule must appear in each IOCR
-        # as EITHER an IODataObject OR an IOCS entry, but NOT both.
-        #
-        # IODataObjects are for submodules that carry data in this IOCR's
-        # direction. IOCS entries are for all OTHER submodules.
-        #
-        # Input IOCR (type=1):
-        #   IODataObject: submodules with input_length > 0
-        #   IOCS: submodules with input_length == 0
-        # Output IOCR (type=2):
-        #   IODataObject: submodules with output_length > 0
-        #   IOCS: submodules with output_length == 0
-        iocs_data = b""
-        iocs_count = 0
-        for slot in setup.slots:
-            # Skip submodules that already have an IODataObject in this IOCR
-            if iocr_type == 1 and slot.input_length > 0:
-                continue
-            if iocr_type == 2 and slot.output_length > 0:
-                continue
-
-            # All other submodules need an IOCS entry
-            iocs_obj = IOCRAPIObject(
-                slot_number=slot.slot,
-                subslot_number=slot.subslot,
-                frame_offset=frame_offset,
             )
-            iocs_data += bytes(iocs_obj)
-            frame_offset += 1  # IOCS is 1 byte
-            iocs_count += 1
+            frame_offset = object_offset + (1 if is_iocs else data_len + 1)
+
+        if not api_entries:
+            api_entries[0] = {"objects": [], "iocs": []}
 
         # Pad to minimum 40 bytes
         data_length = max(40, frame_offset)
@@ -1215,23 +1190,16 @@ class RPCCon:
         # IOCR properties: RT_CLASS_1 = 0x01
         iocr_properties = 0x00000001  # RT_CLASS_1
 
-        # Number of IO data objects
-        num_objects = len(
-            [
-                s
-                for s in setup.slots
-                if (iocr_type == 1 and s.input_length > 0)
-                or (iocr_type == 2 and s.output_length > 0)
-            ]
-        )
-
         # Build IOCRAPI per IEC 61158-6-10:
         # API(4) + nbr_io_data(2) + io_data[] + nbr_iocs(2) + iocs[]
-        api_block = IOCRApiHeaderStruct.build({"api": 0, "num_objects": num_objects})
-        api_block += objects_data  # Frame descriptors for IO data
-        # Add IOCS objects (consumer status for opposite direction)
-        api_block += UInt16ubStruct.build({"value": iocs_count})
-        api_block += iocs_data
+        api_block = b""
+        for api, entries in api_entries.items():
+            api_block += IOCRApiHeaderStruct.build(
+                {"api": api, "num_objects": len(entries["objects"])}
+            )
+            api_block += b"".join(entries["objects"])
+            api_block += UInt16ubStruct.build({"value": len(entries["iocs"])})
+            api_block += b"".join(entries["iocs"])
 
         # Calculate block length: header(38) + api_block
         header_size = PNIOCRBlockReqHeader.fmt_size
@@ -1266,7 +1234,7 @@ class RPCCon:
             data_hold_factor=setup.data_hold_factor,
             iocr_tag_header=0xC000,
             iocr_multicast_mac=bytes(6),
-            number_of_apis=1,
+            number_of_apis=len(api_entries),
         )
 
         return bytes(iocr_header) + api_block
@@ -1302,7 +1270,7 @@ class RPCCon:
                 submodule_type = 0  # NO_IO
 
             builder.add_submodule(
-                api=0,
+                api=slot_cfg.api,
                 slot=slot_cfg.slot,
                 subslot=slot_cfg.subslot,
                 module_ident=slot_cfg.module_ident,

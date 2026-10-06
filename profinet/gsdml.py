@@ -19,7 +19,9 @@ GSDML_TYPE_SIZES: Dict[str, Optional[int]] = {
     "Boolean": 1,
     "Integer8": 1,
     "Integer16": 2,
+    "N2": 2,
     "Integer32": 4,
+    "N4": 4,
     "Integer64": 8,
     "Unsigned8": 1,
     "Unsigned16": 2,
@@ -115,6 +117,7 @@ class GSDMLSubmodule:
     submodule_ident: int
     input_length: int = 0
     output_length: int = 0
+    api: int = 0
 
 
 @dataclass
@@ -248,6 +251,7 @@ class GSDMLDevice:
                             output_length=sub.output_length,
                             module_ident=mod.module_ident,
                             submodule_ident=sub.submodule_ident,
+                            api=sub.api,
                         )
                     )
             elif mod.useable_submodules:
@@ -291,6 +295,7 @@ class GSDMLDevice:
                     output_length=cat_sub.output_length,
                     module_ident=mod.module_ident,
                     submodule_ident=cat_sub.submodule_ident,
+                    api=cat_sub.api,
                 )
             )
 
@@ -369,6 +374,7 @@ def _parse_submodule(elem: ET.Element) -> GSDMLSubmodule:
         submodule_ident=_parse_int(elem.get("SubmoduleIdentNumber")),
         input_length=_parse_io_data_size(elem, "Input"),
         output_length=_parse_io_data_size(elem, "Output"),
+        api=_parse_int(elem.get("API")),
     )
 
 
@@ -510,6 +516,7 @@ def load_gsdml(path: Union[str, Path]) -> GSDMLDevice:
 def parse_gsdml(
     path: Union[str, Path],
     slot_assignment: Optional[Dict[int, str]] = None,
+    submodule_assignment: Optional[Dict[int, Dict[int, str]]] = None,
 ) -> List[IOSlot]:
     """Parse GSDML file and build IOSlot list.
 
@@ -519,9 +526,11 @@ def parse_gsdml(
         path: Path to GSDML XML file.
         slot_assignment: Optional explicit slot_number -> module_id mapping.
             If None, uses FixedInSlots from the GSDML.
+        submodule_assignment: Optional explicit slot_number -> subslot_number -> submodule_id mapping.
+            If None, uses FixedInSubslots from the GSDML.
 
     Returns:
         List of IOSlot ready for IOCRSetup.
     """
     device = load_gsdml(path)
-    return device.build_io_slots(slot_assignment=slot_assignment)
+    return device.build_io_slots(slot_assignment=slot_assignment, submodule_assignment=submodule_assignment)

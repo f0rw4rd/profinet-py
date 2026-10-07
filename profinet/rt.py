@@ -113,8 +113,8 @@ class IODataObject:
     iops_offset: int
     """Offset for IOPS (Provider Status) byte."""
 
-    iocs_offset: int = 0
-    """Offset for IOCS (Consumer Status) byte, if applicable."""
+    iocs_offset: int = -1
+    """Offset for IOCS (Consumer Status) byte, -1 if the object has no IOCS."""
 
 
 @dataclass
@@ -422,7 +422,7 @@ class CyclicDataBuilder:
         """
         for obj in self.config.objects:
             if obj.slot == slot and obj.subslot == subslot:
-                if obj.iocs_offset > 0:
+                if obj.iocs_offset >= 0:
                     with self._write_lock:
                         self._write_buffer[obj.iocs_offset] = status
                         self._dirty = True
@@ -450,7 +450,7 @@ class CyclicDataBuilder:
         """
         with self._write_lock:
             for obj in self.config.objects:
-                if obj.iocs_offset > 0:
+                if obj.iocs_offset >= 0:
                     self._write_buffer[obj.iocs_offset] = status
             self._dirty = True
 
@@ -564,7 +564,7 @@ def build_iocr_configs(
                     frame_offset=frame_offset,
                     data_length=0 if is_iocs else data_length,
                     iops_offset=0 if is_iocs else frame_offset + data_length,
-                    iocs_offset=frame_offset if is_iocs else 0,
+                    iocs_offset=frame_offset if is_iocs else -1,
                 )
             )
             frame_end = frame_offset + (1 if is_iocs else data_length + 1)

@@ -495,6 +495,31 @@ class CyclicDataBuilder:
             self._dirty = True
 
 
+def _iter_iocr_layout(slots, iocr_type: int):
+    """Yield (slot, data_length, frame_offset, is_iocs) in wire order.
+
+    IOCS acknowledges the opposite provider, including input-side no-I/O IOPS.
+    """
+    if iocr_type not in (IOCR_TYPE_INPUT, IOCR_TYPE_OUTPUT):
+        raise ValueError(f"Unsupported IOCR type: {iocr_type}")
+
+    opposite_type = IOCR_TYPE_OUTPUT if iocr_type == IOCR_TYPE_INPUT else IOCR_TYPE_INPUT
+    frame_offset = 0
+    for is_iocs, provider_type in ((False, iocr_type), (True, opposite_type)):
+        for slot in slots:
+            data_length = (
+                slot.input_length if provider_type == IOCR_TYPE_INPUT else slot.output_length
+            )
+            has_provider = data_length > 0 or (
+                provider_type == IOCR_TYPE_INPUT
+                and slot.input_length == 0
+                and slot.output_length == 0
+            )
+            if has_provider:
+                yield slot, data_length, frame_offset, is_iocs
+                frame_offset += 1 if is_iocs else data_length + 1
+
+
 def build_iocr_configs(
     slots,
     input_frame_id: int,
@@ -505,8 +530,8 @@ def build_iocr_configs(
 ):
     """Build IOCRConfig objects for CyclicController from slot definitions.
 
-    Computes frame offsets matching what RPCCon._build_iocr_block builds,
-    including IOCS entries for submodules without data in each direction.
+    Uses the same data/IOPS and opposite-direction IOCS layout as the RPC
+    connection request. IOCS-only entries describe status, not process data.
 
     Each slot object must have: slot, subslot, input_length, output_length.
 
@@ -524,84 +549,39 @@ def build_iocr_configs(
         (those with input data but no output data), enabling set_all_iocs()
         to properly acknowledge received input.
     """
-    # --- Input IOCR: device -> controller ---
-    input_objects = []
-    frame_offset = 0
-    for s in slots:
-        if s.input_length > 0:
-            input_objects.append(
+    configs = []
+    for iocr_type, frame_id in (
+        (IOCR_TYPE_INPUT, input_frame_id),
+        (IOCR_TYPE_OUTPUT, output_frame_id),
+    ):
+        objects = []
+        frame_end = 0
+        for slot, data_length, frame_offset, is_iocs in _iter_iocr_layout(slots, iocr_type):
+            objects.append(
                 IODataObject(
-                    slot=s.slot,
-                    subslot=s.subslot,
+                    slot=slot.slot,
+                    subslot=slot.subslot,
                     frame_offset=frame_offset,
-                    data_length=s.input_length,
-                    iops_offset=frame_offset + s.input_length,
+                    data_length=0 if is_iocs else data_length,
+                    iops_offset=0 if is_iocs else frame_offset + data_length,
+                    iocs_offset=frame_offset if is_iocs else 0,
                 )
             )
-            frame_offset += s.input_length + 1  # data + IOPS byte
-
-    # IOCS entries for slots with no input data
-    for s in slots:
-        if s.input_length == 0:
-            frame_offset += 1
-
-    input_iocr = IOCRConfig(
-        iocr_type=IOCR_TYPE_INPUT,
-        iocr_reference=1,
-        frame_id=input_frame_id,
-        send_clock_factor=send_clock_factor,
-        reduction_ratio=reduction_ratio,
-        watchdog_factor=watchdog_factor,
-        data_length=max(40, frame_offset),
-        objects=input_objects,
-    )
-
-    # --- Output IOCR: controller -> device ---
-    output_objects = []
-    frame_offset = 0
-    for s in slots:
-        if s.output_length > 0:
-            output_objects.append(
-                IODataObject(
-                    slot=s.slot,
-                    subslot=s.subslot,
-                    frame_offset=frame_offset,
-                    data_length=s.output_length,
-                    iops_offset=frame_offset + s.output_length,
-                )
+            frame_end = frame_offset + (1 if is_iocs else data_length + 1)
+        configs.append(
+            IOCRConfig(
+                iocr_type=iocr_type,
+                iocr_reference=iocr_type,
+                frame_id=frame_id,
+                send_clock_factor=send_clock_factor,
+                reduction_ratio=reduction_ratio,
+                watchdog_factor=watchdog_factor,
+                data_length=max(40, frame_end),
+                objects=objects,
             )
-            frame_offset += s.output_length + 1  # data + IOPS byte
+        )
 
-    # IOCS entries for slots with no output data (PROTO-2/3 fix).
-    # These are submodules that have input data but no output data
-    # (e.g., DAP submodules). The controller must set their IOCS to
-    # GOOD in the output frame to tell the device "I received your input".
-    for s in slots:
-        if s.output_length == 0:
-            output_objects.append(
-                IODataObject(
-                    slot=s.slot,
-                    subslot=s.subslot,
-                    frame_offset=frame_offset,
-                    data_length=0,
-                    iops_offset=0,
-                    iocs_offset=frame_offset,
-                )
-            )
-            frame_offset += 1
-
-    output_iocr = IOCRConfig(
-        iocr_type=IOCR_TYPE_OUTPUT,
-        iocr_reference=2,
-        frame_id=output_frame_id,
-        send_clock_factor=send_clock_factor,
-        reduction_ratio=reduction_ratio,
-        watchdog_factor=watchdog_factor,
-        data_length=max(40, frame_offset),
-        objects=output_objects,
-    )
-
-    return input_iocr, output_iocr
+    return configs[0], configs[1]
 
 
 def build_ethernet_frame(

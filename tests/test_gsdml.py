@@ -531,6 +531,96 @@ class TestNamespaceHandling:
 
 
 # ---------------------------------------------------------------------------
+# TestMultiApi
+# ---------------------------------------------------------------------------
+class TestMultiApi:
+    """API number inheritance for multi-API GSDML files.
+
+    GSDML wraps each API's ModuleList/SubmoduleList in an
+    ApplicationProcessAPI element carrying the API attribute; the individual
+    items have no API attribute of their own.
+    """
+
+    MULTI_API_GSDML = """\
+<ISO15745Profile>
+  <ProfileBody>
+    <DeviceIdentity VendorID="0x002A" DeviceID="0x0003"/>
+    <ApplicationProcess>
+      <DeviceAccessPointList>
+        <DeviceAccessPointItem ID="DAP_1" ModuleIdentNumber="0x00000001">
+          <VirtualSubmoduleList>
+            <VirtualSubmoduleItem ID="DAP_Sub" SubmoduleIdentNumber="0x00000001">
+              <IOData><Input><DataItem DataType="Unsigned8"/></Input></IOData>
+            </VirtualSubmoduleItem>
+          </VirtualSubmoduleList>
+        </DeviceAccessPointItem>
+      </DeviceAccessPointList>
+      <ModuleList>
+        <ModuleItem ID="MOD_DEFAULT" ModuleIdentNumber="0x00000010">
+          <VirtualSubmoduleList>
+            <VirtualSubmoduleItem ID="MOD_DEFAULT_Sub"
+                                  SubmoduleIdentNumber="0x00000001">
+              <IOData><Input><DataItem DataType="OctetString" Length="4"/></Input></IOData>
+            </VirtualSubmoduleItem>
+          </VirtualSubmoduleList>
+        </ModuleItem>
+      </ModuleList>
+      <ApplicationProcessAPI API="0x3">
+        <ModuleList>
+          <ModuleItem ID="MOD_API3" ModuleIdentNumber="0x00000020">
+            <VirtualSubmoduleList>
+              <VirtualSubmoduleItem ID="MOD_API3_Sub"
+                                    SubmoduleIdentNumber="0x00000002">
+                <IOData><Output><DataItem DataType="OctetString" Length="8"/></Output></IOData>
+              </VirtualSubmoduleItem>
+            </VirtualSubmoduleList>
+          </ModuleItem>
+        </ModuleList>
+        <SubmoduleList>
+          <SubmoduleItem ID="IDS_API3" SubmoduleIdentNumber="0x00000100">
+            <IOData><Input><DataItem DataType="OctetString" Length="16"/></Input></IOData>
+          </SubmoduleItem>
+        </SubmoduleList>
+      </ApplicationProcessAPI>
+    </ApplicationProcess>
+  </ProfileBody>
+</ISO15745Profile>
+"""
+
+    def test_unwrapped_module_defaults_to_api_zero(self):
+        dev = _device_from_xml(self.MULTI_API_GSDML)
+        assert dev.modules["MOD_DEFAULT"].submodules[0].api == 0
+
+    def test_wrapped_module_inherits_wrapper_api(self):
+        dev = _device_from_xml(self.MULTI_API_GSDML)
+        assert dev.modules["MOD_API3"].submodules[0].api == 0x3
+
+    def test_catalog_submodule_inherits_wrapper_api(self):
+        dev = _device_from_xml(self.MULTI_API_GSDML)
+        assert dev.submodule_catalog["IDS_API3"].api == 0x3
+
+    def test_module_sizes_still_parsed_inside_wrapper(self):
+        dev = _device_from_xml(self.MULTI_API_GSDML)
+        assert dev.modules["MOD_API3"].submodules[0].output_length == 8
+
+    def test_explicit_api_attribute_overrides_inherited(self):
+        xml = self.MULTI_API_GSDML.replace(
+            'SubmoduleIdentNumber="0x00000002"',
+            'SubmoduleIdentNumber="0x00000002" API="0x7"',
+        )
+        dev = _device_from_xml(xml)
+        assert dev.modules["MOD_API3"].submodules[0].api == 0x7
+
+    def test_namespaced_wrapper_still_inherits_api(self):
+        xml = self.MULTI_API_GSDML.replace(
+            "<ISO15745Profile>",
+            '<ISO15745Profile xmlns="http://www.profibus.com/GSDML/2.4">',
+        )
+        dev = _device_from_xml(xml)
+        assert dev.modules["MOD_API3"].submodules[0].api == 0x3
+
+
+# ---------------------------------------------------------------------------
 # TestEdgeCases
 # ---------------------------------------------------------------------------
 class TestEdgeCases:

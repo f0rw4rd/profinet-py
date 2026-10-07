@@ -383,23 +383,31 @@ class GSDMLDevice:
         return slots
 
 
-def _parse_submodule(elem: ET.Element) -> GSDMLSubmodule:
-    """Parse a VirtualSubmoduleItem element."""
+def _parse_submodule(elem: ET.Element, inherited_api: int = 0) -> GSDMLSubmodule:
+    """Parse a VirtualSubmoduleItem element.
+
+    The API number comes from the enclosing ApplicationProcessAPI element
+    (multi-API GSDML wraps each API's module/submodule lists in one);
+    VirtualSubmoduleItem has no API attribute in the GSDML schema. An
+    explicit attribute would win if a file carries one, but the schema
+    way is the wrapper.
+    """
+    api = _parse_int(elem.get("API")) if elem.get("API") is not None else inherited_api
     return GSDMLSubmodule(
         id=elem.get("ID", ""),
         submodule_ident=_parse_int(elem.get("SubmoduleIdentNumber")),
         input_length=_parse_io_data_size(elem, "Input"),
         output_length=_parse_io_data_size(elem, "Output"),
-        api=_parse_int(elem.get("API")),
+        api=api,
     )
 
 
-def _parse_virtual_submodules(parent: ET.Element) -> List[GSDMLSubmodule]:
+def _parse_virtual_submodules(parent: ET.Element, inherited_api: int = 0) -> List[GSDMLSubmodule]:
     """Parse VirtualSubmoduleList from a parent element."""
     vsl = _find(parent, "VirtualSubmoduleList")
     if vsl is None:
         return []
-    return [_parse_submodule(vs) for vs in _findall(vsl, "VirtualSubmoduleItem")]
+    return [_parse_submodule(vs, inherited_api) for vs in _findall(vsl, "VirtualSubmoduleItem")]
 
 
 def _parse_system_submodules(dap_elem: ET.Element) -> List[GSDMLSystemSubmodule]:
@@ -482,17 +490,25 @@ def _parse_gsdml_root(root: ET.Element) -> GSDMLDevice:
         device.device_id = _parse_int(dev_ident.get("DeviceID"))
 
     # Top-level SubmoduleList (referenced by UseableSubmodules)
-    for sub_elem in _findall_deep(root, "SubmoduleItem"):
-        sub = _parse_submodule(sub_elem)
-        device.submodule_catalog[sub.id] = sub
+    # SubmoduleLists live inside ApplicationProcessAPI wrappers in multi-API
+    # files; inherit the wrapper's API number. Files without the wrapper
+    # (single-API, the common case) yield api=0.
+    api_elems = _findall_deep(root, "ApplicationProcessAPI") or [root]
+    for api_elem in api_elems:
+        api_nr = _parse_int(api_elem.get("API"))
+        for sub_elem in _findall_deep(api_elem, "SubmoduleItem"):
+            sub = _parse_submodule(sub_elem, api_nr)
+            device.submodule_catalog[sub.id] = sub
 
     # DeviceAccessPointList
+    parent_map = {child: parent for parent in root.iter() for child in parent}
     for dap_elem in _findall_deep(root, "DeviceAccessPointItem"):
+        dap_api = _api_of_ancestor(parent_map, dap_elem)
         useable, fixed, allowed = _parse_useable_modules(dap_elem)
         dap = GSDMLDAP(
             id=dap_elem.get("ID", ""),
             module_ident=_parse_int(dap_elem.get("ModuleIdentNumber")),
-            submodules=_parse_virtual_submodules(dap_elem),
+            submodules=_parse_virtual_submodules(dap_elem, dap_api),
             system_submodules=_parse_system_submodules(dap_elem),
             useable_modules=useable,
             fixed_slots=fixed,
@@ -502,11 +518,12 @@ def _parse_gsdml_root(root: ET.Element) -> GSDMLDevice:
 
     # ModuleList
     for mod_elem in _findall_deep(root, "ModuleItem"):
+        mod_api = _api_of_ancestor(parent_map, mod_elem)
         useable_subs, fixed_subs, allowed_subs = _parse_useable_submodules(mod_elem)
         mod = GSDMLModule(
             id=mod_elem.get("ID", ""),
             module_ident=_parse_int(mod_elem.get("ModuleIdentNumber")),
-            submodules=_parse_virtual_submodules(mod_elem),
+            submodules=_parse_virtual_submodules(mod_elem, mod_api),
             useable_submodules=useable_subs,
             fixed_subslots=fixed_subs,
             allowed_subslots=allowed_subs,
@@ -514,6 +531,21 @@ def _parse_gsdml_root(root: ET.Element) -> GSDMLDevice:
         device.modules[mod.id] = mod
 
     return device
+
+
+def _api_of_ancestor(parent_map: dict, elem: ET.Element) -> int:
+    """API number of the ApplicationProcessAPI ancestor of elem, 0 if none."""
+    node = parent_map.get(elem)
+    while node is not None:
+        if _local_name(node.tag) == "ApplicationProcessAPI":
+            return _parse_int(node.get("API"))
+        node = parent_map.get(node)
+    return 0
+
+
+def _local_name(tag: str) -> str:
+    """Strip XML namespace from a tag."""
+    return tag.rsplit("}", 1)[-1]
 
 
 def load_gsdml(path: Union[str, Path]) -> GSDMLDevice:

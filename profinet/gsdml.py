@@ -533,4 +533,6 @@ def parse_gsdml(
         List of IOSlot ready for IOCRSetup.
     """
     device = load_gsdml(path)
-    return device.build_io_slots(slot_assignment=slot_assignment, submodule_assignment=submodule_assignment)
+    return device.build_io_slots(
+        slot_assignment=slot_assignment, submodule_assignment=submodule_assignment
+    )

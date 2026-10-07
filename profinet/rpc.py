@@ -21,7 +21,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import construct as cs
 
 from . import blocks, dcp, indices
-from .rt import _iter_iocr_layout
 from .alarm_listener import AlarmEndpoint, AlarmListener
 from .blocks import (
     ExpectedSubmoduleBlockReq,
@@ -50,7 +49,6 @@ from .protocol import (
     PNAlarmCRBlockRes,
     PNARBlockRequest,
     PNBlockHeader,
-    PNDCPBlock,
     PNInM0,
     PNInM1,
     PNInM2,
@@ -74,6 +72,7 @@ from .protocol import (
     PNNRDData,
     PNRPCHeader,
 )
+from .rt import _iter_iocr_layout
 from .util import s2mac
 
 # =============================================================================
@@ -492,6 +491,7 @@ class IOSlot:
 
     api: int = 0
     """API number """
+
 
 # Minimum recommended cycle time for Python (due to GIL and OS scheduling)
 PYTHON_MIN_CYCLE_TIME_MS = 8

@@ -792,8 +792,8 @@ class TestBuildIOCRConfigs:
         # Offset 4 should be IOPS for slot 2
         assert payload[4] == IOXS_GOOD
 
-    def test_output_iocr_no_iocs_when_all_have_output(self):
-        """If all slots have output data, no extra IOCS-only entries needed."""
+    def test_output_iocr_has_iocs_for_bidirectional_slots(self):
+        """Bidirectional slots carry output data and input-consumer status."""
         from profinet.rt import build_iocr_configs
 
         class FakeSlot:
@@ -816,9 +816,12 @@ class TestBuildIOCRConfigs:
             watchdog_factor=3,
         )
 
-        # Only 1 object for the actual data
-        assert len(out_iocr.objects) == 1
-        assert out_iocr.objects[0].data_length == 4
+        assert len(out_iocr.objects) == 2
+        data_obj, iocs_obj = out_iocr.objects
+        assert data_obj.data_length == 4
+        assert data_obj.iops_offset == 4
+        assert iocs_obj.data_length == 0
+        assert iocs_obj.iocs_offset == 5
 
 
 # =============================================================================

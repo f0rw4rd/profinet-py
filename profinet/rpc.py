@@ -49,6 +49,7 @@ from .protocol import (
     PNAlarmCRBlockRes,
     PNARBlockRequest,
     PNBlockHeader,
+    PNDCPBlock,
     PNInM0,
     PNInM1,
     PNInM2,
@@ -766,6 +767,9 @@ def epm_lookup(
             data, addr = sock.recvfrom(4096)
         except TimeoutError:
             logger.debug(f"EPM lookup timeout for {ip}:{port}")
+            return []
+        except ConnectionResetError:
+            logger.debug(f"EPM lookup connection reset by {ip}:{port}")
             return []
 
         if len(data) < 80:

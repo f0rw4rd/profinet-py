@@ -303,12 +303,16 @@ class GSDMLDevice:
         self,
         device_slots: list,
         dap_id: Optional[str] = None,
+        submodule_assignment: Optional[Dict[int, Dict[int, str]]] = None,
     ) -> List[IOSlot]:
         """Build IOSlot list by matching runtime slot discovery against GSDML.
 
         Args:
             device_slots: List of SlotInfo from discover_slots().
             dap_id: DAP to use. If None, uses first DAP.
+            submodule_assignment: Optional slot -> subslot -> submodule_id
+                overrides applied on top of the discovered configuration.
+                Used when the discovered submodule is wrong or missing.
 
         Returns:
             List of IOSlot with IO sizes filled from GSDML catalog.
@@ -347,12 +351,23 @@ class GSDMLDevice:
                         )
 
         slots: List[IOSlot] = []
+        sub_assign = submodule_assignment or {}
         for ds in device_slots:
             input_len = 0
             output_len = 0
-            mod_subs = ident_lookup.get(ds.module_ident, {})
-            if ds.submodule_ident in mod_subs:
-                input_len, output_len = mod_subs[ds.submodule_ident]
+            submodule_ident = ds.submodule_ident
+            # Explicit submodule override: look up sizes by catalog id
+            override_id = sub_assign.get(ds.slot, {}).get(ds.subslot)
+            if override_id is not None:
+                cat_sub = self.submodule_catalog.get(override_id)
+                if cat_sub is not None:
+                    submodule_ident = cat_sub.submodule_ident
+                    input_len = cat_sub.input_length
+                    output_len = cat_sub.output_length
+            else:
+                mod_subs = ident_lookup.get(ds.module_ident, {})
+                if ds.submodule_ident in mod_subs:
+                    input_len, output_len = mod_subs[ds.submodule_ident]
             slots.append(
                 IOSlot(
                     slot=ds.slot,
@@ -360,7 +375,7 @@ class GSDMLDevice:
                     input_length=input_len,
                     output_length=output_len,
                     module_ident=ds.module_ident,
-                    submodule_ident=ds.submodule_ident,
+                    submodule_ident=submodule_ident,
                     api=ds.api,
                 )
             )

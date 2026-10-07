@@ -413,6 +413,39 @@ class TestBuildIOSlotsFromDevice:
         slots = dev.build_io_slots_from_device([])
         assert slots == []
 
+    def test_submodule_assignment_override_resolves_catalog_sizes(self):
+        """A catalog override replaces the discovered submodule and its sizes."""
+        dev = _device_from_xml(TestUseableSubmodules.GSDML_WITH_SUBMODULE_LIST)
+        # Discovery reports a bogus submodule ident for slot 2 subslot 2
+        device_slots = [
+            self.FakeSlotInfo(
+                slot=2, subslot=1, module_ident=0x1000032A, submodule_ident=0x00000001
+            ),
+            self.FakeSlotInfo(slot=2, subslot=2, module_ident=0x1000032A, submodule_ident=0xDEAD),
+        ]
+        slots = dev.build_io_slots_from_device(
+            device_slots, submodule_assignment={2: {2: "IDS_8CH"}}
+        )
+        assert slots[1].submodule_ident == 0x00000118
+        assert slots[1].input_length == 80
+        assert slots[1].output_length == 16
+
+    def test_submodule_assignment_unknown_id_falls_back_to_discovery(self):
+        """An override naming an unknown catalog id leaves the slot unmatched."""
+        dev = _device_from_xml(TestUseableSubmodules.GSDML_WITH_SUBMODULE_LIST)
+        device_slots = [
+            self.FakeSlotInfo(
+                slot=2, subslot=2, module_ident=0x1000032A, submodule_ident=0x00000114
+            ),
+        ]
+        slots = dev.build_io_slots_from_device(
+            device_slots, submodule_assignment={2: {2: "NO_SUCH_ID"}}
+        )
+        # Fall back to the discovered ident, which is not in ident_lookup here
+        assert slots[0].submodule_ident == 0x00000114
+        assert slots[0].input_length == 0
+        assert slots[0].output_length == 0
+
     def test_preserves_api(self):
         dev = _device_from_xml(MINIMAL_GSDML)
         device_slots = [

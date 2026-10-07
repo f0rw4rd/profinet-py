@@ -901,6 +901,11 @@ class CyclicController:
         data_events = []
         with self._input_lock:
             for obj in self.input_iocr.objects:
+                if obj.data_length == 0:
+                    # IOCS-only object: this submodule has no input data in
+                    # this frame; its byte is consumer status for the device's
+                    # output, not provider status for us.
+                    continue
                 if obj.iops_offset >= len(frame.payload):
                     continue
                 if obj.frame_offset + obj.data_length > len(frame.payload):

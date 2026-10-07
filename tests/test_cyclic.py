@@ -526,6 +526,33 @@ class TestInputFrameProcessing:
         ctrl = make_controller()
         assert ctrl.get_input_data(1, 1) is None
 
+    def test_iocs_only_object_records_no_input(self):
+        """A data_length==0 object is consumer status, not provider data.
+
+        The input frame carries an IOCS-only entry for a submodule whose
+        provider data lives in the opposite frame; processing must not
+        manufacture input data or a status entry for it.
+        """
+        input_iocr = make_input_iocr(
+            data_length=40,
+            objects=[
+                IODataObject(slot=1, subslot=1, frame_offset=0, data_length=4, iops_offset=4),
+                IODataObject(
+                    slot=2, subslot=1, frame_offset=5, data_length=0, iops_offset=0, iocs_offset=5
+                ),
+            ],
+        )
+        ctrl = make_controller(input_iocr=input_iocr)
+        ctrl._state = CyclicState.RUNNING
+        payload = b"\x01\x02\x03\x04\x80" + b"\x80" + b"\x00" * 34
+        data = self._build_eth_frame(ctrl, 1, payload=payload)
+        ctrl._process_input_frame(data)
+
+        # Real input recorded for slot 1, nothing for the IOCS-only slot 2
+        assert ctrl.get_input_data(1, 1) == b"\x01\x02\x03\x04"
+        assert ctrl.get_input_data(2, 1, allow_bad=True) is None
+        assert ctrl.get_input_status(2, 1) is None
+
 
 # =============================================================================
 # CyclicController - Misc

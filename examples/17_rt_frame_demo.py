@@ -84,10 +84,10 @@ def demo_iocr_config():
         data_length=48,
         objects=[
             IODataObject(
-                slot=1, subslot=1, frame_offset=0, data_length=8, iops_offset=8, iocs_offset=0
+                slot=1, subslot=1, frame_offset=0, data_length=8, iops_offset=8, iocs_offset=-1
             ),
             IODataObject(
-                slot=2, subslot=1, frame_offset=9, data_length=4, iops_offset=13, iocs_offset=0
+                slot=2, subslot=1, frame_offset=9, data_length=4, iops_offset=13, iocs_offset=-1
             ),
         ],
     )

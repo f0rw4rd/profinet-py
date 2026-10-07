@@ -320,14 +320,23 @@ class TestBuildIocrConfigs:
 
         assert input_iocr.iocr_type == IOCR_TYPE_INPUT
         assert input_iocr.frame_id == 0xC001
-        assert [(o.frame_offset, o.data_length, o.iops_offset) for o in input_iocr.objects] == [
-            (0, 4, 4),
-            (5, 2, 7),
+        # Data objects first, then IOCS-only entries for the opposite direction
+        assert [
+            (o.frame_offset, o.data_length, o.iops_offset, o.iocs_offset)
+            for o in input_iocr.objects
+        ] == [
+            (0, 4, 4, -1),
+            (5, 2, 7, -1),
+            (8, 0, 0, 8),  # slot 2 IOCS: acknowledges its output data
         ]
 
         assert output_iocr.iocr_type == IOCR_TYPE_OUTPUT
         # Only slot 2 has output data; slot 1 contributes an IOCS byte
-        assert [(o.slot, o.frame_offset) for o in output_iocr.objects] == [(2, 0)]
+        assert [(o.slot, o.frame_offset, o.iocs_offset) for o in output_iocr.objects] == [
+            (2, 0, -1),
+            (1, 3, 3),  # slot 1 IOCS: acknowledges its input data
+            (2, 4, 4),  # slot 2 IOCS: input-side consumer status
+        ]
 
     def test_minimum_data_length_floor(self):
         slots = [
@@ -426,8 +435,13 @@ class TestCyclicTopologyPolicy:
             cyclic.call_args.kwargs["input_iocr"],
             cyclic.call_args.kwargs["output_iocr"],
         )
-        assert [(obj.slot, obj.subslot) for obj in input_iocr.objects] == [(1, 1)]
-        assert [(obj.slot, obj.subslot) for obj in output_iocr.objects] == [(2, 1)]
+        # Data objects for the direction plus IOCS-only entries for the other
+        assert [(obj.slot, obj.subslot) for obj in input_iocr.objects if obj.data_length > 0] == [
+            (1, 1)
+        ]
+        assert [(obj.slot, obj.subslot) for obj in output_iocr.objects if obj.data_length > 0] == [
+            (2, 1)
+        ]
 
     def test_library_policy_defaults_to_complete_topology(self):
         slots = [IOSlot(0, 0x8000), IOSlot(1, 1, input_length=8)]

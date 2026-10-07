@@ -823,6 +823,45 @@ class TestBuildIOCRConfigs:
         assert iocs_obj.data_length == 0
         assert iocs_obj.iocs_offset == 5
 
+    def test_iocs_at_offset_zero_is_written(self):
+        """Input-only device: output IOCS at frame offset 0 must be written.
+
+        set_all_iocs() used to skip iocs_offset == 0, treating it as "no
+        IOCS". On an input-only device every output-frame object is IOCS and
+        the first sits at offset 0; leaving it 0x00 (BAD) makes the device
+        tear down the AR.
+        """
+        from profinet.rt import IOXS_GOOD, CyclicDataBuilder, build_iocr_configs
+
+        class FakeSlot:
+            def __init__(self, slot, subslot, input_length, output_length):
+                self.slot = slot
+                self.subslot = subslot
+                self.input_length = input_length
+                self.output_length = output_length
+
+        slots = [
+            FakeSlot(slot=0, subslot=1, input_length=4, output_length=0),
+            FakeSlot(slot=1, subslot=1, input_length=2, output_length=0),
+        ]
+
+        _in_iocr, out_iocr = build_iocr_configs(
+            slots,
+            0xC001,
+            0xC000,
+            send_clock_factor=32,
+            reduction_ratio=32,
+            watchdog_factor=3,
+        )
+
+        builder = CyclicDataBuilder(out_iocr)
+        builder.set_all_iocs(IOXS_GOOD)
+        builder.swap()
+        payload = builder.build()
+
+        assert payload[0] == IOXS_GOOD
+        assert payload[1] == IOXS_GOOD
+
 
 # =============================================================================
 # BUG-5: Version string

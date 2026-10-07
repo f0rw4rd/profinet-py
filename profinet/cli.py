@@ -29,7 +29,7 @@ from .exceptions import (
 )
 from .protocol import PNInM0, PNInM1, PNInM2, PNInM3
 from .rpc import IOCRSetup, IOSlot
-from .rt import IOCR_TYPE_INPUT, IOCR_TYPE_OUTPUT, IOCRConfig, IODataObject
+from .rt import IOCRConfig, build_iocr_configs
 from .util import ethernet_socket, get_mac, s2mac
 
 logger = logging.getLogger(__name__)
@@ -386,52 +386,15 @@ def _build_iocr_configs(
     reduction_ratio: int,
     watchdog_factor: int = 6,
 ) -> Tuple[IOCRConfig, IOCRConfig]:
-    """Build IOCRConfig pair from IOSlots and ConnectResult frame IDs.
-
-    Mirrors the frame_offset calculation in RPCCon._build_iocr_block().
-    """
-
-    def _build_one(iocr_type: int, frame_id: int) -> IOCRConfig:
-        objects: List[IODataObject] = []
-        frame_offset = 0
-
-        # IODataObjects for slots with data in this direction
-        for s in slots:
-            data_len = s.input_length if iocr_type == IOCR_TYPE_INPUT else s.output_length
-            if data_len > 0:
-                objects.append(
-                    IODataObject(
-                        slot=s.slot,
-                        subslot=s.subslot,
-                        frame_offset=frame_offset,
-                        data_length=data_len,
-                        iops_offset=frame_offset + data_len,
-                    )
-                )
-                frame_offset += data_len + 1  # data + IOPS
-
-        # IOCS entries for slots without data in this direction
-        for s in slots:
-            data_len = s.input_length if iocr_type == IOCR_TYPE_INPUT else s.output_length
-            if data_len == 0:
-                frame_offset += 1  # IOCS byte
-
-        data_length = max(40, frame_offset)
-
-        return IOCRConfig(
-            iocr_type=iocr_type,
-            iocr_reference=1 if iocr_type == IOCR_TYPE_INPUT else 2,
-            frame_id=frame_id,
-            send_clock_factor=send_clock_factor,
-            reduction_ratio=reduction_ratio,
-            watchdog_factor=watchdog_factor,
-            data_length=data_length,
-            objects=objects,
-        )
-
-    input_iocr = _build_one(IOCR_TYPE_INPUT, input_frame_id)
-    output_iocr = _build_one(IOCR_TYPE_OUTPUT, output_frame_id)
-    return input_iocr, output_iocr
+    """Build IOCRConfig pair from IOSlots and ConnectResult frame IDs."""
+    return build_iocr_configs(
+        slots=slots,
+        input_frame_id=input_frame_id,
+        output_frame_id=output_frame_id,
+        send_clock_factor=send_clock_factor,
+        reduction_ratio=reduction_ratio,
+        watchdog_factor=watchdog_factor,
+    )
 
 
 def cmd_cyclic(args: argparse.Namespace) -> int:

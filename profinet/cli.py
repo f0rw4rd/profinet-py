@@ -436,7 +436,9 @@ def cmd_cyclic(args: argparse.Namespace) -> int:
                 slot_n, subslot_n, sub_id = int(parts[0]), int(parts[1]), parts[2]
                 sub_assign.setdefault(slot_n, {})[subslot_n] = sub_id
 
-        io_slots = gsdml_device.build_io_slots_from_device(device_slots)
+        io_slots = gsdml_device.build_io_slots_from_device(
+            device_slots, submodule_assignment=sub_assign
+        )
         setup = IOCRSetup(
             slots=io_slots,
             send_clock_factor=32,

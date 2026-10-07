@@ -491,3 +491,59 @@ class TestCyclicTopologyPolicy:
 
         assert default_args.exclude_zero_io_submodules is False
         assert opted_in_args.exclude_zero_io_submodules is True
+
+    def _wire_cyclic(self, monkeypatch, topology_slots):
+        """Mock the seams cmd_cyclic touches up to and including the cyclic run."""
+        gsdml_device = MagicMock()
+        gsdml_device.build_io_slots_from_device.return_value = topology_slots
+        monkeypatch.setattr(gsdml_module, "load_gsdml", MagicMock(return_value=gsdml_device))
+
+        info = SimpleNamespace(ip="192.168.0.10", mac="02:00:00:00:00:01")
+        monkeypatch.setattr(cli.rpc, "get_station_info", MagicMock(return_value=info))
+        conn = MagicMock()
+        conn.discover_slots.return_value = topology_slots
+        conn._socket.recvfrom.side_effect = TimeoutError
+        conn.connect.side_effect = [
+            None,
+            SimpleNamespace(has_cyclic=True, input_frame_id=0xC001, output_frame_id=0x8002),
+        ]
+        monkeypatch.setattr(cli.rpc, "RPCCon", MagicMock(return_value=conn))
+        monkeypatch.setattr(cyclic_module, "CyclicController", MagicMock())
+        monotonic = iter((0.0, 1.1))
+        monkeypatch.setattr(cli.time, "monotonic", lambda: next(monotonic))
+        monkeypatch.setattr(cli.time, "sleep", lambda _seconds: None)
+        return gsdml_device, conn
+
+    def _cyclic_args(self, **overrides):
+        defaults = {
+            "interface": "eth0",
+            "target": "dev",
+            "gsdml": "device.gsdml",
+            "submodule": None,
+            "cycle_ms": 32,
+            "duration": 1,
+            "exclude_zero_io_submodules": False,
+        }
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def test_submodule_override_reaches_gsdml(self, net, monkeypatch):
+        topo = [IOSlot(1, 1, 4, 0, module_ident=2, submodule_ident=1)]
+        gsdml_device, _conn = self._wire_cyclic(monkeypatch, topo)
+        args = self._cyclic_args(submodule=["2:2:IDS_8CH", "3:1:IDS_4CH"])
+
+        assert cli.cmd_cyclic(args) == 0
+        assert gsdml_device.build_io_slots_from_device.call_args.kwargs["submodule_assignment"] == {
+            2: {2: "IDS_8CH"},
+            3: {1: "IDS_4CH"},
+        }
+
+    def test_submodule_override_invalid_format_exits(self, net, monkeypatch, capsys):
+        topo = [IOSlot(1, 1, 4, 0, module_ident=2, submodule_ident=1)]
+        gsdml_device, conn = self._wire_cyclic(monkeypatch, topo)
+        args = self._cyclic_args(submodule=["bad-format"])
+
+        assert cli.cmd_cyclic(args) == 1
+        gsdml_device.build_io_slots_from_device.assert_not_called()
+        conn.close.assert_called_once()
+        assert "invalid --submodule format" in capsys.readouterr().out

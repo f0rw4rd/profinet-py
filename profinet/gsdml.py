@@ -361,6 +361,7 @@ class GSDMLDevice:
                     output_length=output_len,
                     module_ident=ds.module_ident,
                     submodule_ident=ds.submodule_ident,
+                    api=ds.api,
                 )
             )
 

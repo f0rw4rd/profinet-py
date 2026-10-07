@@ -354,6 +354,7 @@ class TestBuildIOSlotsFromDevice:
         subslot: int
         module_ident: int = 0
         submodule_ident: int = 0
+        api: int = 0
 
     def test_matching_fills_io_sizes(self):
         dev = _device_from_xml(MINIMAL_GSDML)
@@ -411,6 +412,16 @@ class TestBuildIOSlotsFromDevice:
         dev = _device_from_xml(MINIMAL_GSDML)
         slots = dev.build_io_slots_from_device([])
         assert slots == []
+
+    def test_preserves_api(self):
+        dev = _device_from_xml(MINIMAL_GSDML)
+        device_slots = [
+            self.FakeSlotInfo(
+                slot=1, subslot=1, module_ident=0x00000010, submodule_ident=0x00000001, api=2
+            ),
+        ]
+        slots = dev.build_io_slots_from_device(device_slots)
+        assert slots[0].api == 2
 
 
 # ---------------------------------------------------------------------------
@@ -881,6 +892,7 @@ class TestUseableSubmodules:
             subslot: int
             module_ident: int = 0
             submodule_ident: int = 0
+            api: int = 0
 
         device_slots = [
             FakeSlot(1, 1, 0x10000000, 0x20000000),  # IDM_DEV inline

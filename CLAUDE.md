@@ -70,9 +70,9 @@ isolated, non-safety-critical device on a dedicated interface.
 `reference/` exists locally but is gitignored and not part of the repository;
 do not assume it exists in other checkouts and never import from it.
 
-Package data: `pyproject.toml` has no explicit package-data table; packages are
-found with `include = ["profinet*"]`, and `profinet/py.typed` ships in the
-wheel. Keep `py.typed` in place.
+Package data: packages are found with `include = ["profinet*"]`, and
+`profinet/py.typed` ships through `[tool.setuptools.package-data]` in
+`pyproject.toml`. Keep it listed there.
 
 ## Protocol stack and design constraints
 

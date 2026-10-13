@@ -51,11 +51,11 @@ from .blocks import (
     PeerInfo,
     RealIdentificationData,
     SlotInfo,
-    # WriteMultiple
-    WriteMultipleResult,
     # SubmoduleList
     SubmoduleListBlock,
     SubmoduleListEntry,
+    # WriteMultiple
+    WriteMultipleResult,
     # Parsing functions
     parse_block_header,
     parse_module_diff_block,
@@ -242,13 +242,13 @@ from .rpc import (
     IOCRSetup,
     # IOCR setup classes
     IOSlot,
-    SRInfoConfig,
     LinkData,
     LogEntry,
     PortInfo,
     # Data classes
     PortStatistics,
     RPCCon,
+    SRInfoConfig,
     epm_lookup,
     get_station_info,
 )

@@ -654,7 +654,7 @@ class SRInfoConfig:
     """8-byte config ID part of System Redundancy ARUUID. Auto-generated if empty."""
 
     redundancy_data_hold_factor: int = 500
-    """Mandatory. Expiration of this time in milliseconds leads to AR termination. Minimum 3. 
+    """Mandatory. Expiration of this time in milliseconds leads to AR termination. Minimum 3.
     This is information sent to devices. Not enforced by this implementation!"""
 
     def __post_init__(self) -> None:

@@ -936,5 +936,5 @@ class SystemRedundancy:
     def __enter__(self) -> SystemRedundancy:
         return self
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    def __exit__(self, *args) -> None:
         self.close()

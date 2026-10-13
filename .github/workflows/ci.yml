@@ -108,6 +108,16 @@ jobs:
       - name: Install package with test dependencies
         run: pip install -e ".[dev]"
 
+      # tshark is the decode oracle for tests/test_wireshark_oracle.py and
+      # tests/test_sr_wire.py; without it those tests skip.
+      - name: Install tshark
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends tshark
+          tshark --version | head -1
+
       - name: Run pytest
         run: pytest -v
 

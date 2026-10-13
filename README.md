@@ -21,6 +21,7 @@ A Python library for PROFINET IO communication, acting as an IO-Controller.
 - **Declarative Parsing**: Binary protocol parsing via [construct](https://construct.readthedocs.io/) library
 - **Cross-Platform**: Linux (AF_PACKET), Windows (Npcap)
 - **High-level API**: `ProfinetDevice` class and `scan()` for quick device interaction
+- **System Redundancy (S2)**: Dual-controller redundancy with role arbitration (Primary/Backup), synchronized I/O process image, bump-free switchover, and multi-phase startup parameterization
 
 ## Requirements
 
@@ -111,6 +112,9 @@ profinet -i eth0 cyclic device-name --gsdml device.xml --cycle-ms 16
 # Exclude zero-I/O submodules (device interoperability workaround)
 profinet -i eth0 cyclic device-name --gsdml device.xml --exclude-zero-io-submodules
 ```
+
+## System Redundancy
+See [doc/system_redundancy.md](doc/system_redundancy.md) for details.
 
 ## Support
 

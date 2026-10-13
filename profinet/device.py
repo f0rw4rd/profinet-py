@@ -50,6 +50,7 @@ from .protocol import (
 )
 from .rpc import (
     RPCCon,
+    SRInfoConfig,
     epm_lookup,
     get_station_info,
 )
@@ -1150,6 +1151,8 @@ class ProfinetDevice:
         iocr_setup: Any,
         max_consecutive_timeouts: int = 3,
         *,
+        sr_info: Optional[SRInfoConfig] = None,
+        primary: bool = True,
         start_rt_before_prm_end: bool = True,
         confirm_application_ready: bool = True,
         start_alarm_listener: bool = True,
@@ -1157,7 +1160,7 @@ class ProfinetDevice:
         """Start cyclic IO exchange with device.
 
         Handles the cyclic IO lifecycle:
-        1. Open a fresh IOCARSingle + IOCR + AlarmCR AR.
+        1. Open a fresh IOCARSingle/IOCARSR + IOCR + AlarmCR AR.
         2. Build IOCRConfigs from the assigned frame IDs.
         3. Optionally start RT output before PrmEnd.
         4. Send PrmEnd.
@@ -1174,6 +1177,10 @@ class ProfinetDevice:
             iocr_setup: IOCRSetup with slots, timing, etc.
             max_consecutive_timeouts: Watchdog timeouts before FAULT
                 (0 = monitoring-only, never enters FAULT and keeps IOCS GOOD)
+            sr_info: Optional SRInfoBlock configuration. Establish IOCARSR (System Redundancy AR)
+                instead of IOCARSingle.
+            primary: Initial DataStatus.State role for cyclic output
+                (True=Primary, False=Backup). Used only with System Redundancy
             start_rt_before_prm_end: Start RT output frames after Connect but
                 before PrmEnd (default True, matches typical controller
                 startup). Set False to restore the old post-ApplicationReady
@@ -1224,6 +1231,7 @@ class ProfinetDevice:
                 src_mac=self._src_mac,
                 with_alarm_cr=True,
                 iocr_setup=iocr_setup,
+                sr_info=sr_info,
             )
             if not result or not result.has_cyclic:
                 raise RuntimeError("Cyclic IO not established by device")
@@ -1248,6 +1256,7 @@ class ProfinetDevice:
                 input_iocr=input_iocr,
                 output_iocr=output_iocr,
                 max_consecutive_timeouts=max_consecutive_timeouts,
+                primary=primary,
             )
 
             self._rpc = rpc

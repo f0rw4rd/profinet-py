@@ -217,18 +217,9 @@ def main():
         rpc.close()
         sys.exit(1)
 
-    # ---- Step 5: ApplicationReady ----
-    print("\n[5] ApplicationReady (waiting for device CControl)...")
-    try:
-        rpc.application_ready(timeout=30.0)
-        print("    OK - device in RUN state")
-    except Exception as e:
-        print(f"    Failed: {e}")
-        rpc.close()
-        sys.exit(1)
 
     # ---- Step 6: Build IOCRConfigs and start cyclic ----
-    print(f"\n[6] Starting cyclic exchange ({CYCLE_TIME_MS}ms cycle)...")
+    print(f"\n[5] Starting cyclic exchange ({CYCLE_TIME_MS}ms cycle)...")
 
     input_iocr, output_iocr = build_iocr_configs(
         iocr_setup.slots,
@@ -266,6 +257,16 @@ def main():
     cyclic.set_output_data(ECHO_SLOT, ECHO_SUBSLOT, b"\x00" * ECHO_OUTPUT_LEN)
 
     cyclic.start()
+    
+    # ---- Step 6: ApplicationReady ----
+    print("\n[6] ApplicationReady (waiting for device CControl)...")
+    try:
+        rpc.application_ready(timeout=30.0)
+        print("    OK - device in RUN state")
+    except Exception as e:
+        print(f"    Failed: {e}")
+        rpc.close()
+        sys.exit(1)
     print("    Press Ctrl+C to stop.\n")
 
     # ---- Step 7: Run - read inputs, update outputs ----

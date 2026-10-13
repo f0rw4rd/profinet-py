@@ -26,6 +26,7 @@ from .blocks import (
     ExpectedSubmoduleBlockReq,
     IODWriteMultipleBuilder,
     ModuleDiffBlock,
+    SubmoduleListBlock,
     WriteMultipleResult,
     parse_module_diff_block,
     parse_write_multiple_response,
@@ -73,8 +74,9 @@ from .protocol import (
     PNIODReleaseBlock,
     PNNRDData,
     PNRPCHeader,
+    PNSRInfoBlock,
 )
-from .rt import _iter_iocr_layout
+from .rt import IOCR_TYPE_INPUT, _iter_iocr_layout
 from .util import s2mac
 
 # =============================================================================
@@ -630,6 +632,84 @@ class IOCRSetup:
 
 
 @dataclass
+class SRInfoConfig:
+    """Configuration for SRInfoBlock, mandatory when establishing a System
+    Redundancy AR (``ar_type == AR_TYPE_IOCARSR``).
+
+    WARNING: EXPERIMENTAL
+    =====================================================
+    Only the AR type and this block are sent; full IEC 61158-6-10 System
+    Redundancy semantics (SRInfoBlock other than these two fields, RDHT
+    enforcement, ARFSU, name-of-station suffixes, CIR data sync between
+    controllers) are NOT implemented. Use at your own risk.
+    """
+
+    ar_number: int = 1
+    """AR number (1 = 1st AR, 2 = 2nd AR, etc. Stored in ARUUID Selector bits 0-2). Mandatory for System Redundancy."""
+
+    discriminator: bytes = b""
+    """6-byte discriminator part of System Redundancy ARUUID. Auto-generated if empty."""
+
+    config_id: bytes = b""
+    """8-byte config ID part of System Redundancy ARUUID. Auto-generated if empty."""
+
+    redundancy_data_hold_factor: int = 500
+    """Mandatory. Expiration of this time in milliseconds leads to AR termination. Minimum 3. 
+    This is information sent to devices. Not enforced by this implementation!"""
+
+    def __post_init__(self) -> None:
+        if not (1 <= self.ar_number <= 7):
+            raise ValueError(f"ar_number must be between 1 and 7, got {self.ar_number}")
+        if not self.discriminator:
+            self.discriminator = os.urandom(6)
+        elif len(self.discriminator) != 6:
+            raise ValueError(f"discriminator must be 6 bytes, got {len(self.discriminator)}")
+        if not self.config_id:
+            self.config_id = os.urandom(8)
+        elif len(self.config_id) != 8:
+            raise ValueError(f"config_id must be 8 bytes, got {len(self.config_id)}")
+
+    @property
+    def ar_uuid(self) -> bytes:
+        """Calculate 16-byte DCE/RPC ARUUID for System Redundancy."""
+        selector = (self.ar_number & 0x07) | (2 << 3)
+        return self.discriminator + self.config_id + UInt16ubStruct.build({"value": selector})
+
+    @classmethod
+    def create_pair(
+        cls,
+        discriminator: Optional[bytes] = None,
+        config_id: Optional[bytes] = None,
+        redundancy_data_hold_factor: int = 500,
+    ) -> Tuple[SRInfoConfig, SRInfoConfig]:
+        """Create a pair of SRInfoConfig objects (for 1st and 2nd AR) sharing the same ARUUID base (discriminator & config_id).
+
+        Returns:
+            Tuple of (sr_info_1st, sr_info_2nd)
+        """
+        if redundancy_data_hold_factor < 3:
+            raise ValueError(
+                f"redundancy_data_hold_factor must be >= 3, got {redundancy_data_hold_factor}"
+            )
+
+        disc = discriminator or os.urandom(6)
+        cid = config_id or os.urandom(8)
+        first = cls(
+            ar_number=1,
+            discriminator=disc,
+            config_id=cid,
+            redundancy_data_hold_factor=redundancy_data_hold_factor,
+        )
+        second = cls(
+            ar_number=2,
+            discriminator=disc,
+            config_id=cid,
+            redundancy_data_hold_factor=redundancy_data_hold_factor,
+        )
+        return first, second
+
+
+@dataclass
 class ConnectResult:
     """Result from AR CONNECT with IOCR support."""
 
@@ -954,13 +1034,20 @@ class RPCCon:
         self,
         info: dcp.DCPDeviceDescription,
         timeout: float = DEFAULT_TIMEOUT,
+        ip_address=None,
+        alarm_ref: int = 1,
     ) -> None:
         """Initialize RPC connection to device.
 
         Args:
             info: Device description from DCP discovery
             timeout: Socket timeout in seconds
+            ip_address: Optional local IP address for RPC sockets
+            alarm_ref: Controller's local AlarmCR endpoint reference
         """
+        if not (1 <= alarm_ref <= 0xFFFF):
+            raise ValueError("alarm_ref must be between 1 and 65535")
+
         self.info = info
         self.timeout = timeout
         self.peer = (info.ip, RPC_PORT)
@@ -984,7 +1071,7 @@ class RPCCon:
         self.session_key: int = int.from_bytes(os.urandom(2), "big") or 1  # Random, non-zero
 
         # AlarmCR state
-        self._alarm_ref: int = 1  # Controller's local alarm reference
+        self._alarm_ref: int = alarm_ref  # Controller's local alarm reference
         self._device_alarm_ref: int = 0  # Device's alarm reference (set after connect)
         self._alarm_cr_enabled: bool = False  # Whether AlarmCR was established
 
@@ -998,10 +1085,16 @@ class RPCCon:
         self._input_frame_id: int = 0  # Assigned input frame ID
         self._output_frame_id: int = 0  # Assigned output frame ID
         self._iocr_setup: Optional[IOCRSetup] = None  # IOCR config if enabled
+        self._startup_parameters: List[Tuple[int, int, int, int, bytes]] = []
 
         # UDP socket for RPC with timeout.
         # Uses an ephemeral port for regular request/response.
-        self._socket = socket(AF_INET, SOCK_DGRAM)
+        # Use the provided IP if available
+        if ip_address is not None:
+            self._socket = socket(AF_INET, SOCK_DGRAM)
+            self._socket.bind((ip_address, 0))  # Bind to the provided IP with an ephemeral port
+        else:
+            self._socket = socket(AF_INET, SOCK_DGRAM)
         self._socket.settimeout(timeout)
 
         # CControl/listener socket bound to the well-known RPC port (34964).
@@ -1013,7 +1106,10 @@ class RPCCon:
         try:
             s = socket(AF_INET, SOCK_DGRAM)
             s.setsockopt(_socket_mod.SOL_SOCKET, _socket_mod.SO_REUSEADDR, 1)
-            s.bind(("", RPC_PORT))
+            if ip_address is None:
+                s.bind(("", RPC_PORT))
+            else:
+                s.bind((ip_address, RPC_PORT))
             self._ccontrol_socket = s
             logger.debug(f"CControl socket bound to port {RPC_PORT} at init")
         except OSError as e:
@@ -1133,6 +1229,33 @@ class RPCCon:
 
         return bytes(alarm_cr)
 
+    def _build_sr_info_block(self, sr_info: SRInfoConfig) -> bytes:
+        """Build SRInfoBlock (0x010A), mandatory for a System Redundancy AR.
+
+        Args:
+            sr_info: SRInfoBlock configuration
+
+        Returns:
+            Serialized SRInfoBlock bytes
+        """
+        sr_properties = 0
+
+        block_length = PNSRInfoBlock.fmt_size - 4  # 8 bytes
+        block = PNBlockHeader(
+            PNSRInfoBlock.BLOCK_TYPE,
+            block_length,
+            0x01,  # version high
+            0x00,  # version low
+        )
+
+        sr_info_block = PNSRInfoBlock(
+            block_header=bytes(block),
+            redundancy_data_hold_factor=sr_info.redundancy_data_hold_factor,
+            sr_properties=sr_properties,
+        )
+
+        return bytes(sr_info_block)
+
     def _parse_alarm_cr_response(self, response_data: bytes) -> int:
         """Parse AlarmCRBlockRes from connect response.
 
@@ -1165,6 +1288,7 @@ class RPCCon:
         iocr_type: int,
         iocr_reference: int,
         setup: IOCRSetup,
+        sr_info: Optional[SRInfoConfig] = None,
     ) -> bytes:
         """Build IOCRBlockReq (0x0102) for AR establishment.
 
@@ -1233,6 +1357,17 @@ class RPCCon:
             0x00,  # version low
         )
 
+        # RT_CLASS_1 frame IDs: the controller proposes the input CR
+        # frame ID in the RTC1 range (0xC000-0xF7FF); for the output CR
+        # it sends 0xFFFF and the device assigns the real frame ID,
+        # returned in the IOCRBlockRes of the Connect response.
+        frame_id = 0xFFFF
+        if iocr_type == IOCR_TYPE_INPUT:
+            frame_id = 0xC000 + iocr_reference
+            if sr_info:
+                # For System Redundancy, differentiate the FrameIds
+                frame_id += sr_info.ar_number - 1
+
         iocr_header = PNIOCRBlockReqHeader(
             block_header=bytes(block),
             iocr_type=iocr_type,
@@ -1240,11 +1375,7 @@ class RPCCon:
             lt=0x8892,  # PROFINET EtherType
             iocr_properties=iocr_properties,
             data_length=data_length,
-            # RT_CLASS_1 frame IDs: the controller proposes the input CR
-            # frame ID in the RTC1 range (0xC000-0xF7FF); for the output CR
-            # it sends 0xFFFF and the device assigns the real frame ID,
-            # returned in the IOCRBlockRes of the Connect response.
-            frame_id=0xC000 + iocr_reference if iocr_type == 1 else 0xFFFF,
+            frame_id=frame_id,
             send_clock_factor=setup.send_clock_factor,
             reduction_ratio=setup.reduction_ratio,
             phase=1,  # Phase within reduction cycle (1-based)
@@ -1356,6 +1487,8 @@ class RPCCon:
             RPCFaultError: If device returned fault
             RPCError: If unexpected response type
         """
+        if self._socket is None:
+            raise RPCError("Socket is not initialized")
         rpc_bytes = bytes(rpc)
         logger.debug(f"RPC request ({len(rpc_bytes)} bytes): {rpc_bytes.hex(' ')}")
         self._socket.sendto(rpc_bytes, self.peer)
@@ -1454,6 +1587,7 @@ class RPCCon:
         src_mac: Optional[bytes] = None,
         with_alarm_cr: bool = False,
         iocr_setup: Optional[IOCRSetup] = None,
+        sr_info: Optional[SRInfoConfig] = None,
     ) -> Optional[ConnectResult]:
         """Establish AR (Application Relationship) with device.
 
@@ -1465,6 +1599,12 @@ class RPCCon:
             iocr_setup: Optional IOCR configuration for cyclic IO exchange.
                        If provided, Input/Output IOCRs are established along with
                        the AR. The device assigns frame IDs returned in ConnectResult.
+            sr_info: SRInfoBlock configuration. If not none, establish a System Redundancy AR
+                        (IOCARSR,
+                       ar_type=0x0020) instead of a regular IOCARSingle. Requires
+                       iocr_setup. Sends a mandatory SRInfoBlock (see sr_info).
+                       EXPERIMENTAL: only ar_type + SRInfoBlock are implemented,
+                       not full IEC 61158-6-10 System Redundancy semantics.
 
         Returns:
             ConnectResult with frame IDs if iocr_setup provided, None otherwise
@@ -1479,11 +1619,16 @@ class RPCCon:
             self.src_mac = src_mac
         else:
             # Reconnect: regenerate UUIDs and session key per IEC 61158-6-10
-            self.ar_uuid = os.urandom(16)
             self.activity_uuid = os.urandom(16)
             self.session_key = int.from_bytes(os.urandom(2), "big") or 1
             if src_mac is not None:
                 self.src_mac = src_mac
+
+        # AR UUID is different if System Redundancy used
+        if sr_info is not None:
+            self.ar_uuid = sr_info.ar_uuid
+        elif self.live is not None:
+            self.ar_uuid = os.urandom(16)
 
         if self.src_mac is None:
             raise ValueError("No source MAC address available")
@@ -1509,7 +1654,7 @@ class RPCCon:
         # Bit 30: StartupMode (0=Legacy, 1=Advanced)
         # Bit 31: PullModuleAlarmAllowed
         if iocr_setup:
-            # IO AR (IOCARSingle) with cyclic data:
+            # IO AR (IOCARSingle/IOCARSR) with cyclic data:
             # State=Active(1), PrmServer=CM_Initiator(bit4), DeviceAccess=0
             ar_properties = 0x00000011
         else:
@@ -1526,7 +1671,13 @@ class RPCCon:
 
         # AR Type: 0x0001 = IOCARSingle (IO Controller AR, for cyclic IO)
         #          0x0006 = IOSAR (IO Supervisor AR / DeviceAccess, for read/write only)
-        ar_type = 0x0001 if iocr_setup else 0x0006
+        #          0x0020 = IOCARSR (System Redundancy AR)
+        if sr_info is not None:
+            ar_type = indices.AR_TYPE_IOCARSR
+        elif iocr_setup:
+            ar_type = indices.AR_TYPE_IOCAR_SINGLE
+        else:
+            ar_type = indices.AR_TYPE_IOSAR
 
         ar = PNARBlockRequest(
             bytes(block),
@@ -1558,6 +1709,7 @@ class RPCCon:
                 iocr_type=1,  # Input
                 iocr_reference=self._input_iocr_ref,
                 setup=iocr_setup,
+                sr_info=sr_info,
             )
             nrd_payload += input_iocr
 
@@ -1568,6 +1720,7 @@ class RPCCon:
                 iocr_type=2,  # Output
                 iocr_reference=self._output_iocr_ref,
                 setup=iocr_setup,
+                sr_info=sr_info,
             )
             nrd_payload += output_iocr
 
@@ -1586,6 +1739,10 @@ class RPCCon:
             # AlarmCR without IOCR (DeviceAccess AR with alarm support)
             alarm_cr_data = self._build_alarm_cr_block()
             nrd_payload += alarm_cr_data
+
+        # SRInfoBlock is mandatory for IOCARSR
+        if sr_info is not None:
+            nrd_payload += self._build_sr_info_block(sr_info)
 
         # Debug: dump the NRD payload blocks before sending
         if iocr_setup:
@@ -1837,6 +1994,21 @@ class RPCCon:
 
         logger.debug(f"Write to slot={slot} subslot={subslot} idx=0x{idx:04X} OK")
 
+    def add_startup_parameter(
+        self,
+        api: int,
+        slot: int,
+        subslot: int,
+        idx: int,
+        data: bytes,
+    ) -> None:
+        """Store a record to write automatically before PrmEnd when requested.
+
+        The stored entry contains only the arguments needed by :meth:`write`;
+        RPC and PROFINET block headers are built when the parameter is sent.
+        """
+        self._startup_parameters.append((api, slot, subslot, idx, bytes(data)))
+
     def write_multiple(
         self,
         writes: List[Tuple[int, int, int, bytes, int]],
@@ -1877,24 +2049,7 @@ class RPCCon:
 
         payload = builder.build()
 
-        # Use write() infrastructure but with special index 0xE040
-        block = PNBlockHeader(0x0008, 60, 0x01, 0x00)  # IODWriteReqHeader
-        iod = PNIODHeader(
-            bytes(block),
-            0,
-            self.ar_uuid,
-            0xFFFFFFFF,  # API wildcard for multiple
-            0xFFFF,  # Slot wildcard
-            0xFFFF,  # Subslot wildcard
-            0,
-            IODWriteMultipleBuilder.INDEX,  # 0xE040
-            len(payload),
-            bytes(16),
-            bytes(8),
-            payload=payload,
-        )
-
-        nrd = self._create_nrd(bytes(iod))
+        nrd = self._create_nrd(payload)
         rpc = self._create_rpc(PNRPCHeader.WRITE, bytes(nrd))
 
         rpc_resp = self._send_receive(rpc)
@@ -3010,6 +3165,10 @@ class RPCCon:
         Used for re-parameterization of an existing AR. For initial AR setup,
         the PRM phase begins implicitly after CONNECT.
 
+        If cyclic IO (iocr_setup) is configured, a SubmoduleListBlock (0x0119)
+        containing entries for all submodules in iocr_setup is automatically
+        generated and appended to the control block.
+
         Returns:
             NRD response payload bytes
 
@@ -3019,14 +3178,33 @@ class RPCCon:
         """
         from .indices import BLOCK_PRM_BEGIN_REQ, CONTROL_CMD_PRM_BEGIN
 
-        return self._send_control(BLOCK_PRM_BEGIN_REQ, CONTROL_CMD_PRM_BEGIN)
+        sub_blocks_bytes = b""
+        if self._iocr_setup and self._iocr_setup.slots:
+            sml = SubmoduleListBlock()
+            for s in self._iocr_setup.slots:
+                sml.add_entry(s.api, s.slot, s.subslot)
+            sub_blocks_bytes = sml.to_bytes()
 
-    def prm_end(self) -> Optional[bytes]:
+        return self._send_control(
+            BLOCK_PRM_BEGIN_REQ, CONTROL_CMD_PRM_BEGIN, sub_blocks=sub_blocks_bytes
+        )
+
+    def prm_end(
+        self,
+        send_startup_parameters: bool = False,
+        use_write_multiple: bool = True,
+    ) -> Optional[bytes]:
         """Send PrmEnd control command.
 
         Ends the parameter phase after configuration is complete.
         For IOCARSingle, this should be called after CONNECT (and any
         parameter writes) to transition to DATA state.
+
+        Args:
+            send_startup_parameters: Write records registered with
+                :meth:`add_startup_parameter` before sending PrmEnd.
+            use_write_multiple: Send startup records in one request when true;
+                otherwise send each record with a separate write request.
 
         Returns:
             NRD response payload bytes
@@ -3036,6 +3214,18 @@ class RPCCon:
             PNIOError: If device returns PNIO error
         """
         from .indices import BLOCK_IOD_CONTROL_PRM_END_REQ, CONTROL_CMD_PRM_END
+
+        if send_startup_parameters:
+            if use_write_multiple:
+                writes = [
+                    (slot, subslot, index, data, api)
+                    for api, slot, subslot, index, data in self._startup_parameters
+                ]
+                if writes:
+                    self.write_multiple(writes)
+            else:
+                for parameter in self._startup_parameters:
+                    self.write(*parameter)
 
         return self._send_control(BLOCK_IOD_CONTROL_PRM_END_REQ, CONTROL_CMD_PRM_END)
 
@@ -3338,11 +3528,15 @@ class RPCCon:
             BLOCK_IOD_CONTROL_RT_CLASS_3_REQ, CONTROL_CMD_READY_FOR_RT_CLASS_3
         )
 
-    def disconnect(self) -> None:
+    def disconnect(self, wait_for_response: bool = False) -> None:
         """Send Release request to properly terminate the AR.
 
         Per IEC 61158-6-10, sends ReleaseBlockReq (0x0114) with
         control command 0x0004 to terminate the application relation.
+
+        Args:
+            wait_for_response: Wait for IODReleaseRes using the configured
+                timeout instead of sending Release without waiting.
         """
         if not self.live:
             return  # Not connected
@@ -3365,9 +3559,15 @@ class RPCCon:
             nrd = self._create_nrd(bytes(release))
             rpc = self._create_rpc(PNRPCHeader.RELEASE, bytes(nrd))
 
-            # Send release, don't wait for response (best effort)
-            self._socket.sendto(bytes(rpc), self.peer)
-            logger.debug(f"Sent Release to {self.info.name}")
+            if wait_for_response:
+                rpc_resp = self._send_receive(rpc)
+                nrd_resp = PNNRDData(rpc_resp.payload)
+                if nrd_resp.args_maximum_status != 0:
+                    raise PNIOError.from_args_status(nrd_resp.args_maximum_status)
+                logger.debug(f"Release confirmed by {self.info.name}")
+            else:
+                self._socket.sendto(bytes(rpc), self.peer)
+                logger.debug(f"Sent Release to {self.info.name} without waiting")
 
         except Exception as e:
             logger.debug(f"Release failed: {e}")
@@ -3375,9 +3575,18 @@ class RPCCon:
         self.live = None
         self._live_monotonic = None
 
-    def close(self) -> None:
-        """Close RPC connection (sends Release if connected)."""
-        self.disconnect()
+    def close(self, send_release: bool = True) -> None:
+        """Close RPC sockets, optionally sending Release first.
+
+        Set ``send_release=False`` to stop local RPC communication without
+        notifying the device, allowing its AR watchdog to expire naturally.
+        Release is sent without waiting for a response.
+        """
+        if send_release:
+            self.disconnect()
+        else:
+            self.live = None
+            self._live_monotonic = None
         try:
             self._socket.close()
         except OSError:

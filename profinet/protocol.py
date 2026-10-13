@@ -283,6 +283,18 @@ PNIODReleaseBlock = make_packet(
 )
 
 
+PNSRInfoBlock = make_packet(
+    "PNSRInfoBlock",
+    (
+        ("block_header", "6s"),
+        ("redundancy_data_hold_factor", "H"),
+        ("sr_properties", "I"),
+    ),
+    payload=False,
+    statics={"BLOCK_TYPE": 0x010A},
+)
+
+
 # =============================================================================
 # I&M (Identification & Maintenance) Data
 # =============================================================================

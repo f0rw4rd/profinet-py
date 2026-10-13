@@ -24,7 +24,7 @@ The `SystemRedundancy` class coordinates two redundant IO-Controllers (`PLC.A` a
 
 1) Only One PLC Online
 
-``` mermaid
+```mermaid
 sequenceDiagram
     autonumber
     participant App as Application
@@ -65,7 +65,7 @@ sequenceDiagram
 
 2) PLC.B Connects First, then PLC.A Connects (Both Online)
 
-``` mermaid
+```mermaid
 sequenceDiagram
     autonumber
     participant App as Application
@@ -124,7 +124,7 @@ sequenceDiagram
 
 3) PLC.B Connects First (PLC.A Offline), then PLC.A Comes Online Later
 
-``` mermaid
+```mermaid
 sequenceDiagram
     autonumber
     participant App as Application

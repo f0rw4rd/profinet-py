@@ -101,6 +101,12 @@ ExpectedSubmoduleAPIStruct = cs.Struct(
     "num_submodules" / cs.Int16ub,
 )
 
+SubmoduleListEntryStruct = cs.Struct(
+    "api" / cs.Int32ub,
+    "slot_number" / cs.Int16ub,
+    "subslot_number" / cs.Int16ub,
+)
+
 WriteBlockHeaderStruct = cs.Struct(
     "block_type" / cs.Int16ub,
     "block_length" / cs.Int16ub,
@@ -1082,12 +1088,13 @@ class IODWriteMultipleBuilder:
         """Build the complete IODWriteMultipleReq packet."""
         blocks_data = bytearray()
 
-        for i, (api, slot, subslot, index, data) in enumerate(self.writes):
+        # Start sequence from 1 as sequence number 0 is the MultipleWrite index itself
+        for i, (api, slot, subslot, index, data) in enumerate(self.writes, start=1):
             block = self._build_write_block(i, api, slot, subslot, index, data)
             blocks_data.extend(block)
 
             # 4-byte padding (except last block)
-            if i < len(self.writes) - 1:
+            if i < len(self.writes):
                 pad_len = (4 - (len(block) % 4)) % 4
                 blocks_data.extend(b"\x00" * pad_len)
 
@@ -1344,3 +1351,104 @@ class ExpectedSubmoduleBlockReq:
             }
         )
         return header + body
+
+
+# =============================================================================
+# SubmoduleListBlock (0x0119)
+# =============================================================================
+
+
+@dataclass
+class SubmoduleListEntry:
+    """Entry in SubmoduleListBlock containing API, SlotNumber, and SubslotNumber."""
+
+    api: int = 0
+    slot_number: int = 0
+    subslot_number: int = 0
+
+
+class SubmoduleListBlock:
+    """SubmoduleListBlock (0x0119) builder and parser.
+
+    Per IEC 61158-6-10, SubmoduleListBlock contains a count (2 bytes)
+    followed by entries with API (4 bytes), SlotNumber (2 bytes), and SubslotNumber (2 bytes).
+    """
+
+    BLOCK_TYPE = indices.BLOCK_SUBMODULE_LIST  # 0x0119
+
+    def __init__(self):
+        """Initialize an empty SubmoduleListBlock builder."""
+        self.entries: List[SubmoduleListEntry] = []
+
+    def add_entry(self, api: int, slot_number: int, subslot_number: int) -> "SubmoduleListBlock":
+        """Add a submodule entry."""
+        self.entries.append(
+            SubmoduleListEntry(api=api, slot_number=slot_number, subslot_number=subslot_number)
+        )
+        return self
+
+    def to_bytes(self) -> bytes:
+        """Serialize SubmoduleListBlock to bytes."""
+        from .protocol import PNBlockHeader
+
+        # Header block_length = version (2 bytes) + number_of_entries (2 bytes) + N * 8 bytes entries
+        body_len = 2 + len(self.entries) * 8
+        block_length = 2 + body_len
+
+        header = PNBlockHeader(
+            self.BLOCK_TYPE,
+            block_length,
+            0x01,  # block_version_high
+            0x00,  # block_version_low
+        )
+
+        data = bytearray(bytes(header))
+        data.extend(UInt16ubStruct.build({"value": len(self.entries)}))
+        for entry in self.entries:
+            data.extend(
+                SubmoduleListEntryStruct.build(
+                    {
+                        "api": entry.api,
+                        "slot_number": entry.slot_number,
+                        "subslot_number": entry.subslot_number,
+                    }
+                )
+            )
+
+        return bytes(data)
+
+    def __bytes__(self) -> bytes:
+        return self.to_bytes()
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "SubmoduleListBlock":
+        """Parse SubmoduleListBlock from raw bytes."""
+        if len(data) < 8:
+            raise ValueError(f"SubmoduleListBlock data too short: {len(data)} bytes")
+
+        offset = 6  # skip 6-byte PNBlockHeader
+        num_entries = UInt16ubStruct.parse(data[offset : offset + 2]).value
+        offset += 2
+
+        entries = []
+        for _ in range(num_entries):
+            if offset + 8 > len(data):
+                break
+            entry = SubmoduleListEntryStruct.parse(data[offset : offset + 8])
+            entries.append(
+                SubmoduleListEntry(
+                    api=entry.api,
+                    slot_number=entry.slot_number,
+                    subslot_number=entry.subslot_number,
+                )
+            )
+            offset += 8
+
+        block = cls()
+        block.entries = entries
+        return block
+
+
+def parse_submodule_list_block(data: bytes) -> SubmoduleListBlock:
+    """Parse SubmoduleListBlock from raw bytes."""
+    return SubmoduleListBlock.from_bytes(data)

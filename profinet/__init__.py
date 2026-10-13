@@ -51,6 +51,9 @@ from .blocks import (
     PeerInfo,
     RealIdentificationData,
     SlotInfo,
+    # SubmoduleList
+    SubmoduleListBlock,
+    SubmoduleListEntry,
     # WriteMultiple
     WriteMultipleResult,
     # Parsing functions
@@ -62,6 +65,7 @@ from .blocks import (
     parse_pd_real_data,
     parse_port_statistics,
     parse_real_identification_data,
+    parse_submodule_list_block,
     parse_write_multiple_response,
 )
 from .cyclic import (
@@ -244,6 +248,7 @@ from .rpc import (
     # Data classes
     PortStatistics,
     RPCCon,
+    SRInfoConfig,
     epm_lookup,
     get_station_info,
 )
@@ -258,6 +263,11 @@ from .rt import (
     IODataObject,
     RTFrame,
     build_iocr_configs,
+)
+from .system_redundancy import (
+    PLC,
+    PLCConnection,
+    SystemRedundancy,
 )
 from .util import (
     ethernet_socket,
@@ -377,6 +387,10 @@ __all__ = [
     # IOCR setup classes
     "IOSlot",
     "IOCRSetup",
+    "SRInfoConfig",
+    "SystemRedundancy",
+    "PLC",
+    "PLCConnection",
     "ConnectResult",
     # Python timing constants
     "PYTHON_MIN_CYCLE_TIME_MS",
@@ -434,6 +448,8 @@ __all__ = [
     "ExpectedSubmoduleAPI",
     "ExpectedSubmodule",
     "ExpectedSubmoduleDataDescription",
+    "SubmoduleListBlock",
+    "SubmoduleListEntry",
     "parse_block_header",
     "parse_multiple_block_header",
     "parse_pd_interface_data_real",
@@ -442,6 +458,7 @@ __all__ = [
     "parse_real_identification_data",
     "parse_port_statistics",
     "parse_module_diff_block",
+    "parse_submodule_list_block",
     "parse_write_multiple_response",
     # Alarms module
     "AlarmItem",

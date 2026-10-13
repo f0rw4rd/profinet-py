@@ -131,6 +131,7 @@ class AlarmListener:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._callbacks: List[Callable[[AlarmNotification], None]] = []
+        self._rta_error_callbacks: List[Callable[[int], None]] = []
         self._sock: Optional[socket.socket] = None
 
         # RTA sequence counters (APMS send side / APMR receive side).
@@ -165,6 +166,15 @@ class AlarmListener:
         if callback in self._callbacks:
             self._callbacks.remove(callback)
 
+    def add_rta_error_callback(self, callback: Callable[[int], None]) -> None:
+        """Register a callback for RTA ERROR PDUs, receiving the PNIO status."""
+        self._rta_error_callbacks.append(callback)
+
+    def remove_rta_error_callback(self, callback: Callable[[int], None]) -> None:
+        """Remove a previously registered RTA ERROR callback."""
+        if callback in self._rta_error_callbacks:
+            self._rta_error_callbacks.remove(callback)
+
     def start(self) -> None:
         """Start background alarm listener.
 
@@ -197,18 +207,18 @@ class AlarmListener:
 
         self._running = False
 
-        # Close socket to unblock recv
+        # Wait for the worker thread to exit before closing the raw socket handle
+        # to avoid concurrent close and read operations across backend drivers.
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+            if self._thread.is_alive():
+                logger.warning("Alarm listener thread did not stop cleanly")
+
         if self._sock:
             try:
                 self._sock.close()
             except OSError:
                 pass
-
-        # Wait for thread to finish
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
-            if self._thread.is_alive():
-                logger.warning("Alarm listener thread did not stop cleanly")
 
         self._sock = None
         self._thread = None
@@ -360,6 +370,11 @@ class AlarmListener:
                 if pdu_type == PNRTAHeader.RTA_TYPE_ERR:
                     status = int.from_bytes(alarm_data[:4], "big") if len(alarm_data) >= 4 else 0
                     logger.error(f"RTA ERROR PDU from device, PNIOStatus=0x{status:08X}")
+                    for callback in self._rta_error_callbacks:
+                        try:
+                            callback(status)
+                        except Exception as e:
+                            logger.error(f"RTA ERROR callback failed: {e}", exc_info=True)
                     return
                 if pdu_type != PNRTAHeader.RTA_TYPE_DATA:
                     logger.debug(f"Ignoring RTA PDU type {pdu_type}")

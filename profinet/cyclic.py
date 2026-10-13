@@ -240,6 +240,7 @@ class CyclicController:
         input_iocr: IOCRConfig,
         output_iocr: IOCRConfig,
         max_consecutive_timeouts: int = DEFAULT_MAX_CONSECUTIVE_TIMEOUTS,
+        primary: bool = True,
     ):
         """Initialize cyclic controller.
 
@@ -251,6 +252,9 @@ class CyclicController:
             output_iocr: IOCR config for output data (controller -> device)
             max_consecutive_timeouts: Watchdog timeouts before FAULT state
                 (0 = never enter FAULT)
+            primary: Initial DataStatus.State role (True=Primary, False=Backup).
+                Relevant for System Redundancy AR; use switchover() to change
+                it at runtime.
 
         Warns:
             If cycle time is below recommended minimum for Python.
@@ -266,6 +270,17 @@ class CyclicController:
         self.input_iocr = input_iocr
         self.output_iocr = output_iocr
         self.max_consecutive_timeouts = max_consecutive_timeouts
+
+        # Redundancy role (DataStatus.State bit), mutated via switchover()
+        self._primary = primary
+        self._role_lock = threading.Lock()
+
+        # Configurable DataStatus flags. The State bit is deliberately not
+        # stored here: it is always derived from the current AR role.
+        self._status_run = True
+        self._status_problem = False
+        self._status_valid = True
+        self._status_lock = threading.Lock()
 
         # State machine
         self._state = CyclicState.IDLE
@@ -303,16 +318,25 @@ class CyclicController:
         # until the controller reports that it is consuming input data.
         self._output_builder.set_all_iops(IOXS_GOOD)
         self._output_builder.set_all_iocs(IOXS_GOOD)
+        self._output_iops: Dict[Tuple[int, int], int] = {}
+        self._output_iops_lock = threading.Lock()
         # Tracks the watchdog-driven IOCS state so the RX/timeout paths only
         # rewrite the buffer on transitions (both run on the RX thread).
         self._iocs_good = True
 
         # Callbacks
         self._on_input_data: Optional[Callable[[int, int, bytes], None]] = None
+        self._on_data_change: Optional[Callable[..., None]] = None
         self._on_input_status: Optional[Callable[[int, int, int], None]] = None
+        self._on_slave_apdu_status: Optional[Callable[..., None]] = None
         self._on_timeout: Optional[Callable[[], None]] = None
         self._on_error: Optional[Callable[[str], None]] = None
         self._on_state_change: Optional[Callable[[CyclicState, CyclicState], None]] = None
+
+        # APDU (DataStatus) memory lock and values
+        self._input_apdu_status: Optional[int] = None
+        self._output_apdu_status: Optional[int] = None
+        self._apdu_lock = threading.Lock()
 
         # Statistics
         self.stats = CyclicStats()
@@ -368,6 +392,70 @@ class CyclicController:
     # Public API
     # =========================================================================
 
+    @property
+    def is_primary(self) -> bool:
+        """Current DataStatus.State role (True=Primary, False=Backup)."""
+        with self._role_lock:
+            return self._primary
+
+    def switchover(self) -> bool:
+        """Toggle the DataStatus.State role between Primary and Backup.
+
+        Thread-safe - can be called from any thread. Only flips this
+        controller's own role; coordinating a matching switchover on a
+        companion AR's CyclicController is the caller's responsibility.
+
+        Returns:
+            The new is_primary value after the toggle.
+        """
+        with self._role_lock:
+            self._primary = not self._primary
+            new_role = self._primary
+        logger.info(f"Switchover: now {'primary' if new_role else 'backup'}")
+        return new_role
+
+    def update_status(
+        self,
+        *,
+        run: Optional[bool] = None,
+        problem: Optional[bool] = None,
+        valid: Optional[bool] = None,
+    ) -> int:
+        """Update DataStatus flags for subsequent cyclic output frames.
+
+        The State bit remains controlled by the AR role and changes only via
+        :meth:`switchover`. ``problem=True`` clears StationOK.
+
+        Args:
+            run: Set ProviderRun (True = RUN, False = STOP).
+            problem: Set Station Problem (True = StationOK cleared).
+            valid: Set DataValid.
+
+        Returns:
+            Effective DataStatus byte, including the current AR State bit.
+        """
+        with self._status_lock:
+            if run is not None:
+                self._status_run = run
+            if problem is not None:
+                self._status_problem = problem
+            if valid is not None:
+                self._status_valid = valid
+        return self._build_data_status()
+
+    def _build_data_status(self, run: Optional[bool] = None) -> int:
+        """Build DataStatus from configured flags and the current AR role."""
+        with self._status_lock:
+            effective_run = self._status_run if run is None else run
+            status = DATA_STATUS_STATE if self.is_primary else 0
+            if self._status_valid:
+                status |= DATA_STATUS_VALID
+            if effective_run:
+                status |= DATA_STATUS_PROVIDER_RUN
+            if not self._status_problem:
+                status |= DATA_STATUS_STATION_OK
+            return status
+
     def set_output_data(self, slot: int, subslot: int, data: bytes) -> None:
         """Set output data for next cycle.
 
@@ -385,7 +473,65 @@ class CyclicController:
         if self._state in (CyclicState.FAULT, CyclicState.STOPPED):
             raise RuntimeError(f"Cannot set output data in {self._state.value} state")
         self._output_builder.set_data(slot, subslot, data)
-        self._output_builder.set_iops(slot, subslot, IOXS_GOOD)
+        with self._output_iops_lock:
+            status = self._output_iops.get((slot, subslot), IOXS_GOOD)
+        self._output_builder.set_iops(slot, subslot, status)
+
+    def set_output_status(self, slot: int, subslot: int, status: int = IOXS_GOOD) -> None:
+        """Set the provider status (IOPS) sent for an output submodule.
+
+        The status is sticky: later :meth:`set_output_data` calls for the same
+        submodule keep it instead of implicitly reporting GOOD. Marking a
+        submodule BAD tells the device the output payload is invalid without
+        dropping the AR.
+
+        Thread-safe - can be called from any thread.
+
+        Args:
+            slot: Slot number
+            subslot: Subslot number
+            status: IOXS_GOOD (0x80) or IOXS_BAD (0x00)
+
+        Raises:
+            ValueError: If status is not a byte, or the submodule is unknown
+                or carries no output data (IOCS-only)
+        """
+        if not 0 <= status <= 0xFF:
+            raise ValueError(f"IOPS must be a byte value, got {status}")
+        for obj in self.output_iocr.objects:
+            if obj.slot == slot and obj.subslot == subslot:
+                if obj.data_length == 0:
+                    raise ValueError(
+                        f"Slot/subslot {slot}/{subslot} carries no output data (no IOPS byte)"
+                    )
+                break
+        else:
+            raise ValueError(f"Unknown output slot/subslot: {slot}/{subslot}")
+
+        with self._output_iops_lock:
+            self._output_iops[(slot, subslot)] = status
+        self._output_builder.set_iops(slot, subslot, status)
+
+    def get_output_status(self, slot: int, subslot: int) -> int:
+        """Get the provider status (IOPS) currently sent for an output submodule.
+
+        Args:
+            slot: Slot number
+            subslot: Subslot number
+
+        Returns:
+            IOPS byte being transmitted (0x80 = GOOD)
+        """
+        with self._output_iops_lock:
+            return self._output_iops.get((slot, subslot), IOXS_GOOD)
+
+    def clear_input_data(self) -> None:
+        """Clear cached input data and statuses without invoking callbacks."""
+        with self._input_lock:
+            self._input_data.clear()
+            self._input_status.clear()
+        with self._apdu_lock:
+            self._input_apdu_status = None
 
     def get_input_data(self, slot: int, subslot: int, allow_bad: bool = False) -> Optional[bytes]:
         """Get latest input data from device.
@@ -451,6 +597,19 @@ class CyclicController:
         """
         self._on_input_data = callback
 
+    def on_data_change(self, callback: Callable[..., None]) -> None:
+        """Register callback for changes to valid, nonempty input data.
+
+        Callback is invoked from the RX thread only when a submodule's input
+        payload differs from its previously received value. IOPS-only and
+        IOCS-only objects never invoke this callback.
+
+        Args:
+            callback: Function(slot, subslot, old_data, data, old_iops, iops,
+                old_apdu_status, apdu_status) called when input changes
+        """
+        self._on_data_change = callback
+
     def on_input_status(self, callback: Callable[[int, int, int], None]) -> None:
         """Register callback for provider status (IOPS) changes.
 
@@ -464,6 +623,63 @@ class CyclicController:
             callback: Function(slot, subslot, iops) called on IOPS transitions
         """
         self._on_input_status = callback
+
+    @property
+    def input_apdu_status(self) -> Optional[int]:
+        """Latest received APDU status (DataStatus byte) from slave/device."""
+        with self._apdu_lock:
+            return self._input_apdu_status
+
+    @property
+    def slave_apdu_status(self) -> Optional[int]:
+        """Alias for input_apdu_status."""
+        return self.input_apdu_status
+
+    @property
+    def output_apdu_status(self) -> Optional[int]:
+        """Latest transmitted APDU status (DataStatus byte) from controller."""
+        with self._apdu_lock:
+            return self._output_apdu_status
+
+    @property
+    def controller_apdu_status(self) -> Optional[int]:
+        """Alias for output_apdu_status."""
+        return self.output_apdu_status
+
+    def get_input_apdu_status(self) -> Optional[int]:
+        """Get latest received APDU status from slave/device."""
+        return self.input_apdu_status
+
+    def get_slave_apdu_status(self) -> Optional[int]:
+        """Get latest received APDU status from slave/device."""
+        return self.input_apdu_status
+
+    def get_output_apdu_status(self) -> Optional[int]:
+        """Get latest transmitted APDU status from controller."""
+        return self.output_apdu_status
+
+    def get_controller_apdu_status(self) -> Optional[int]:
+        """Get latest transmitted APDU status from controller."""
+        return self.output_apdu_status
+
+    def on_slave_apdu_status(self, callback: Callable[..., None]) -> None:
+        """Register callback for slave APDU status changes.
+
+        Invoked from RX thread when slave DataStatus changes.
+        Callback can accept (old_status, new_status) or (new_status).
+
+        Args:
+            callback: Function called on slave APDU status change
+        """
+        self._on_slave_apdu_status = callback
+
+    def on_input_apdu_status(self, callback: Callable[..., None]) -> None:
+        """Alias for on_slave_apdu_status."""
+        self._on_slave_apdu_status = callback
+
+    def on_apdu_status_change(self, callback: Callable[..., None]) -> None:
+        """Alias for on_slave_apdu_status."""
+        self._on_slave_apdu_status = callback
 
     def on_timeout(self, callback: Callable[[], None]) -> None:
         """Register callback for watchdog timeout.
@@ -538,11 +754,13 @@ class CyclicController:
             f"(cycle={self.output_iocr.cycle_time_ms:.1f}ms)"
         )
 
-    def stop(self) -> None:
-        """Stop cyclic exchange gracefully.
+    def stop(self, send_stop_frames: bool = True) -> None:
+        """Stop cyclic exchange, optionally without transmitting STOP frames.
 
-        Sends STOP frames (DataStatus with ProviderRun cleared) to let the
-        device enter safe state, then stops threads and closes sockets.
+        By default sends STOP frames (DataStatus with ProviderRun cleared) to
+        let the device enter safe state. Set ``send_stop_frames=False`` to
+        close local communication immediately and let the device detect the
+        AR timeout instead.
 
         Order of operations (BUG-1 fix):
         1. Set _running = False so TX loop exits
@@ -564,8 +782,9 @@ class CyclicController:
         if self._tx_thread and self._tx_thread.is_alive():
             self._tx_thread.join(timeout=2.0)
 
-        # 3. Send STOP frames after TX thread has exited
-        self._send_stop_frames()
+        # 3. Send STOP frames after TX thread has exited when graceful stop is requested.
+        if send_stop_frames:
+            self._send_stop_frames()
 
         # 4. Close RX socket to unblock recv
         if self._rx_sock:
@@ -707,12 +926,10 @@ class CyclicController:
         payload = self._output_builder.build()
 
         if data_status is None:
-            data_status = (
-                DATA_STATUS_VALID
-                | DATA_STATUS_PROVIDER_RUN
-                | DATA_STATUS_STATION_OK
-                | DATA_STATUS_STATE
-            )
+            data_status = self._build_data_status()
+
+        with self._apdu_lock:
+            self._output_apdu_status = data_status
 
         frame = RTFrame(
             frame_id=self.output_iocr.frame_id,
@@ -742,10 +959,7 @@ class CyclicController:
         if not self._tx_sock:
             return
 
-        stop_status = (
-            DATA_STATUS_VALID | DATA_STATUS_STATION_OK | DATA_STATUS_STATE
-            # DATA_STATUS_PROVIDER_RUN is NOT set = STOP
-        )
+        stop_status = self._build_data_status(run=False)
 
         cycle_time_s = self.output_iocr.cycle_time_us / 1_000_000
 
@@ -868,6 +1082,27 @@ class CyclicController:
         if frame.frame_id != self.input_iocr.frame_id:
             return
 
+        # Track APDU status change for slave/device
+        apdu_event = None
+        with self._apdu_lock:
+            old_apdu = self._input_apdu_status
+            new_apdu = frame.data_status
+            if old_apdu != new_apdu:
+                self._input_apdu_status = new_apdu
+                apdu_event = (old_apdu, new_apdu)
+
+        if apdu_event and self._on_slave_apdu_status:
+            old_s, new_s = apdu_event
+            try:
+                self._on_slave_apdu_status(old_s, new_s)
+            except TypeError:
+                try:
+                    self._on_slave_apdu_status(new_s)
+                except Exception as e:
+                    logger.error(f"Slave APDU status callback error: {e}")
+            except Exception as e:
+                logger.error(f"Slave APDU status callback error: {e}")
+
         # Update receive time and reset consecutive timeout counter
         self.stats.last_receive_time = time.perf_counter()
         self.stats.frames_received += 1
@@ -899,6 +1134,7 @@ class CyclicController:
         # sending, so the payload is only usable while IOPS reports GOOD.
         status_events = []
         data_events = []
+        data_change_events = []
         with self._input_lock:
             for obj in self.input_iocr.objects:
                 if obj.data_length == 0:
@@ -913,18 +1149,33 @@ class CyclicController:
 
                 iops = frame.payload[obj.iops_offset]
                 key = (obj.slot, obj.subslot)
+                previous_iops = self._input_status.get(key)
                 was_good = self._is_input_good(obj.slot, obj.subslot)
                 is_good = bool(iops & IOXS_DATA_STATE_GOOD)
+                obj_data = frame.payload[obj.frame_offset : obj.frame_offset + obj.data_length]
+                previous_data = self._input_data.get(key)
 
                 self._input_status[key] = iops
-                self._input_data[key] = frame.payload[
-                    obj.frame_offset : obj.frame_offset + obj.data_length
-                ]
+                if obj.data_length > 0:
+                    self._input_data[key] = obj_data
 
                 if is_good != was_good:
                     status_events.append((obj.slot, obj.subslot, iops))
-                if is_good:
-                    data_events.append((obj.slot, obj.subslot, self._input_data[key]))
+                if is_good and obj.data_length > 0:
+                    data_events.append((obj.slot, obj.subslot, obj_data))
+                    if obj_data != previous_data:
+                        data_change_events.append(
+                            (
+                                obj.slot,
+                                obj.subslot,
+                                previous_data,
+                                obj_data,
+                                previous_iops,
+                                iops,
+                                old_apdu,
+                                new_apdu,
+                            )
+                        )
 
         # Callbacks run outside the lock: they are application code and must not
         # be able to stall the RX thread's next frame while holding it.
@@ -946,6 +1197,13 @@ class CyclicController:
                     self._on_input_data(slot, subslot, obj_data)
                 except Exception as e:
                     logger.error(f"Input callback error: {e}")
+
+        if self._on_data_change:
+            for event in data_change_events:
+                try:
+                    self._on_data_change(*event)
+                except Exception as e:
+                    logger.error(f"Data change callback error: {e}")
 
     def _track_cycle_counter(self, rx_counter: int) -> None:
         """Track received cycle counter for gap/duplicate detection.

@@ -690,6 +690,59 @@ class TestGetStationInfo:
             discover.assert_not_called()
 
 
+class TestStartupParameters:
+    def _rpc(self):
+        rpc = object.__new__(RPCCon)
+        rpc._startup_parameters = []
+        return rpc
+
+    def test_prm_end_batches_registered_parameters_before_control_by_default(self):
+        rpc = self._rpc()
+        calls = []
+        rpc.write = lambda *args: calls.append(("write", args))
+        rpc.write_multiple = lambda writes: calls.append(("write_multiple", writes))
+        rpc._send_control = lambda *args: calls.append(("control", args)) or b"response"
+
+        data = bytearray(b"\x01\x02")
+        rpc.add_startup_parameter(3, 4, 5, 6, data)
+        rpc.add_startup_parameter(7, 8, 9, 10, b"other")
+        data[0] = 0xFF
+
+        result = rpc.prm_end(send_startup_parameters=True)
+
+        assert result == b"response"
+        assert calls == [
+            ("write_multiple", [(4, 5, 6, b"\x01\x02", 3), (8, 9, 10, b"other", 7)]),
+            ("control", (0x0110, 0x0001)),
+        ]
+
+    def test_prm_end_can_write_startup_parameters_individually(self):
+        rpc = self._rpc()
+        calls = []
+        rpc.write = lambda *args: calls.append(("write", args))
+        rpc.write_multiple = lambda writes: calls.append(("write_multiple", writes))
+        rpc._send_control = lambda *args: calls.append(("control", args))
+        rpc.add_startup_parameter(3, 4, 5, 6, b"data")
+
+        rpc.prm_end(send_startup_parameters=True, use_write_multiple=False)
+
+        assert calls == [
+            ("write", (3, 4, 5, 6, b"data")),
+            ("control", (0x0110, 0x0001)),
+        ]
+
+    def test_prm_end_skips_registered_parameters_by_default(self):
+        rpc = self._rpc()
+        calls = []
+        rpc.write = lambda *args: calls.append(("write", args))
+        rpc._send_control = lambda *args: calls.append(("control", args))
+        rpc.add_startup_parameter(0, 1, 2, 3, b"data")
+
+        rpc.prm_end()
+
+        assert calls == [("control", (0x0110, 0x0001))]
+
+
 class TestCreateAlarmListener:
     @pytest.mark.parametrize("alarm_enabled", [False, True])
     @pytest.mark.parametrize("mac", ["aa:bb:cc:dd:ee:ff", b"\xaa\xbb\xcc\xdd\xee\xff"])
@@ -1325,6 +1378,52 @@ class TestCControlSocketLifecycle:
             assert rpc._ccontrol_socket is mock_ccontrol
             mock_ccontrol.bind.assert_called_once_with(("", 0x8894))
             rpc.close()
+
+
+class TestDisconnectTimeout:
+    def test_disconnect_uses_configured_rpc_timeout(self):
+        from types import SimpleNamespace
+
+        rpc = object.__new__(RPCCon)
+        rpc.live = True
+        rpc.timeout = 7.0
+        rpc.ar_uuid = bytes(16)
+        rpc.session_key = 1
+        rpc.info = SimpleNamespace(name="test-device")
+        rpc._socket = MagicMock()
+        rpc._create_nrd = MagicMock(return_value=b"nrd")
+        rpc._create_rpc = MagicMock(return_value=object())
+        observed_timeouts = []
+
+        def send_receive(_request):
+            observed_timeouts.append(rpc.timeout)
+            return SimpleNamespace(payload=b"response")
+
+        rpc._send_receive = send_receive
+
+        with patch("profinet.rpc.PNNRDData", return_value=SimpleNamespace(args_maximum_status=0)):
+            rpc.disconnect(wait_for_response=True)
+
+        assert observed_timeouts == [7.0]
+        assert rpc.timeout == 7.0
+        rpc._socket.settimeout.assert_not_called()
+
+    def test_disconnect_does_not_wait_by_default(self):
+        rpc = object.__new__(RPCCon)
+        rpc.live = True
+        rpc.ar_uuid = bytes(16)
+        rpc.session_key = 1
+        rpc.info = MagicMock(name="test-device")
+        rpc._socket = MagicMock()
+        rpc.peer = ("192.0.2.1", 34964)
+        rpc._create_nrd = MagicMock(return_value=b"nrd")
+        rpc._create_rpc = MagicMock(return_value=b"release")
+        rpc._send_receive = MagicMock()
+
+        rpc.disconnect()
+
+        rpc._socket.sendto.assert_called_once_with(b"release", rpc.peer)
+        rpc._send_receive.assert_not_called()
 
     def test_ccontrol_socket_closed_on_close(self):
         """_ccontrol_socket is closed when close() is called."""

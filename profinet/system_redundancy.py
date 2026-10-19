@@ -19,7 +19,12 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from . import dcp
 from .alarm_listener import AlarmEndpoint, AlarmListener
 from .alarms import AlarmNotification
-from .cyclic import DEFAULT_MAX_CONSECUTIVE_TIMEOUTS, CyclicController, CyclicState
+from .cyclic import (
+    DEFAULT_MAX_CONSECUTIVE_TIMEOUTS,
+    CyclicController,
+    CyclicState,
+    _apdu_status_callback,
+)
 from .rpc import DEFAULT_TIMEOUT, ConnectResult, IOCRSetup, RPCCon, SRInfoConfig
 from .rt import IOXS_GOOD, build_iocr_configs
 from .util import get_mac, s2mac
@@ -181,7 +186,11 @@ class SystemRedundancy:
         self._on_data_change: Optional[Callable[..., None]] = None
         self._on_backup_data_change: Optional[Callable[..., None]] = None
         self._on_input_status: Optional[Callable[[int, int, int], None]] = None
-        self._on_slave_apdu_status: Optional[Callable[..., None]] = None
+        self._on_slave_apdu_status: Optional[Callable[[Optional[int], int], None]] = None
+        # Internal role waiters, notified next to the user APDU callback so
+        # waiting for an acknowledgement never replaces the user's callback
+        self._apdu_waiters: List[Tuple[CyclicController, Callable[[int], None]]] = []
+        self._apdu_waiters_lock = threading.Lock()
         self._on_timeout: Optional[Callable[[], None]] = None
         self._on_error: Optional[Callable[[str], None]] = None
         self._on_state_change: Optional[Callable[[CyclicState, CyclicState], None]] = None
@@ -566,29 +575,33 @@ class SystemRedundancy:
 
         event = threading.Event()
 
-        def on_status_change(*args: Any) -> None:
-            new_status = args[-1] if args else None
+        def on_status_change(new_status: int) -> None:
             logger.debug(
                 f"PLC {plc.value}: slave APDU update "
                 f"{f'0x{status:02X}' if status is not None else 'none'} -> "
                 f"{f'0x{new_status:02X}' if new_status is not None else 'none'}"
             )
-            if new_status is not None and (new_status & 0x01) == expected_state:
+            if (new_status & 0x01) == expected_state:
                 logger.debug(f"PLC {plc.value}: slave acknowledged {role}")
                 if report:
                     print(f"    PLC {plc.value}: acknowledged {role}")
                 event.set()
 
-        cyclic.on_slave_apdu_status(on_status_change)
+        waiter = (cyclic, on_status_change)
+        with self._apdu_waiters_lock:
+            self._apdu_waiters.append(waiter)
+        try:
+            status = cyclic.slave_apdu_status
+            if status is not None and (status & 0x01) == expected_state:
+                event.set()
 
-        status = cyclic.slave_apdu_status
-        if status is not None and (status & 0x01) == expected_state:
-            event.set()
-
-        if not event.wait(timeout=timeout):
-            raise RuntimeError(
-                f"Timeout ({timeout}s) waiting for slave PLC {plc.value} APDU status {role}"
-            )
+            if not event.wait(timeout=timeout):
+                raise RuntimeError(
+                    f"Timeout ({timeout}s) waiting for slave PLC {plc.value} APDU status {role}"
+                )
+        finally:
+            with self._apdu_waiters_lock:
+                self._apdu_waiters.remove(waiter)
 
     def wait_for_slave_primary(
         self,
@@ -866,8 +879,17 @@ class SystemRedundancy:
             cyclic.on_data_change(on_role_data_change)
         if self._on_input_status:
             cyclic.on_input_status(self._on_input_status)
-        if self._on_slave_apdu_status:
-            cyclic.on_slave_apdu_status(self._on_slave_apdu_status)
+
+        def on_apdu_status(old_status: Optional[int], new_status: int) -> None:
+            # Waiters first: a failing user callback must not stall a role wait
+            with self._apdu_waiters_lock:
+                waiters = [fn for owner, fn in self._apdu_waiters if owner is cyclic]
+            for waiter in waiters:
+                waiter(new_status)
+            if self._on_slave_apdu_status:
+                self._on_slave_apdu_status(old_status, new_status)
+
+        cyclic.on_slave_apdu_status(on_apdu_status)
         if self._on_timeout:
             cyclic.on_timeout(self._on_timeout)
         if self._on_error:
@@ -910,10 +932,12 @@ class SystemRedundancy:
                 connection.cyclic.on_input_status(callback)
 
     def on_slave_apdu_status(self, callback: Callable[..., None]) -> None:
-        self._on_slave_apdu_status = callback
-        for connection in self.plcs.values():
-            if connection.cyclic:
-                connection.cyclic.on_slave_apdu_status(callback)
+        """Register a callback for slave APDU status changes on either AR.
+
+        Like :meth:`CyclicController.on_slave_apdu_status`, it may accept
+        ``(old_status, new_status)`` or ``(new_status)``.
+        """
+        self._on_slave_apdu_status = _apdu_status_callback(callback)
 
     def on_timeout(self, callback: Callable[[], None]) -> None:
         self._on_timeout = callback

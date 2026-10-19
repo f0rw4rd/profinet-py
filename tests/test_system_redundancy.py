@@ -1,3 +1,4 @@
+import threading
 from unittest.mock import MagicMock, call, patch
 
 from profinet.dcp import DCPDeviceDescription
@@ -611,3 +612,59 @@ def test_offline_can_wait_for_slave_timeout_before_stopping_alarm_listener():
     rpc_a.close.assert_called_once_with(send_release=False)
     assert system.plcs[PLC.A].rpc is None
     assert system.plcs[PLC.A].alarm_listener is None
+
+
+class FakeApduCyclic:
+    """Minimal stand-in for the APDU status parts of CyclicController."""
+
+    def __init__(self, status=None):
+        self.slave_apdu_status = status
+        self.apdu_callback = None
+        self.is_primary = False
+
+    def on_slave_apdu_status(self, callback):
+        self.apdu_callback = callback
+
+    def fire(self, new_status):
+        old_status, self.slave_apdu_status = self.slave_apdu_status, new_status
+        if self.apdu_callback is not None:
+            self.apdu_callback(old_status, new_status)
+
+    def __getattr__(self, name):
+        if name.startswith("on_"):
+            return lambda callback: None
+        raise AttributeError(name)
+
+
+def test_role_wait_keeps_user_apdu_callback_registered():
+    system = make_system_redundancy([MagicMock(), MagicMock()])
+    user_calls = []
+    system.on_slave_apdu_status(lambda old, new: user_calls.append((old, new)))
+    cyclic = FakeApduCyclic(status=0x34)
+    system._apply_callbacks(cyclic)
+
+    timer = threading.Timer(0.05, cyclic.fire, args=(0x35,))
+    timer.start()
+    try:
+        system._wait_for_slave_role(cyclic, PLC.A, primary=True, timeout=2.0)
+    finally:
+        timer.join()
+    cyclic.fire(0x34)
+
+    assert user_calls == [(0x34, 0x35), (0x35, 0x34)]
+
+
+def test_role_wait_drops_its_waiter_after_timeout():
+    system = make_system_redundancy([MagicMock(), MagicMock()])
+    cyclic = FakeApduCyclic(status=0x34)
+    system._apply_callbacks(cyclic)
+
+    try:
+        system._wait_for_slave_role(cyclic, PLC.A, primary=True, timeout=0.05)
+    except RuntimeError as error:
+        assert "Timeout" in str(error)
+    else:
+        raise AssertionError("role wait must time out without a matching APDU status")
+
+    cyclic.fire(0x35)
+    assert system._apdu_waiters == []

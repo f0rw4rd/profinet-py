@@ -10,7 +10,9 @@ import pytest
 
 sys.path.insert(0, ".")
 
+from profinet.blocks import WriteMultipleResult
 from profinet.dcp import DCPDeviceDescription
+from profinet.exceptions import PNIOError
 from profinet.protocol import PNBlockHeader, PNDCPBlock, PNIODReleaseBlock
 from profinet.rpc import (
     MAU_TYPES,
@@ -700,7 +702,9 @@ class TestStartupParameters:
         rpc = self._rpc()
         calls = []
         rpc.write = lambda *args: calls.append(("write", args))
-        rpc.write_multiple = lambda writes: calls.append(("write_multiple", writes))
+        rpc.write_multiple = lambda writes: (
+            calls.append(("write_multiple", writes)) or [WriteMultipleResult() for _ in writes]
+        )
         rpc._send_control = lambda *args: calls.append(("control", args)) or b"response"
 
         data = bytearray(b"\x01\x02")
@@ -741,6 +745,28 @@ class TestStartupParameters:
         rpc.prm_end()
 
         assert calls == [("control", (0x0110, 0x0001))]
+
+    def test_prm_end_raises_and_skips_control_when_a_startup_record_is_rejected(self):
+        rpc = self._rpc()
+        calls = []
+        # Overall ArgsStatus OK, but the second record carries a PNIORW
+        # write-length error (ErrorCode 0xDF, ErrorDecode 0x80, EC1 0xB1).
+        rpc.write_multiple = lambda writes: [
+            WriteMultipleResult(index=6),
+            WriteMultipleResult(slot=8, subslot=9, index=10, status=0xDF80B101),
+        ]
+        rpc._send_control = lambda *args: calls.append(("control", args))
+        rpc.add_startup_parameter(3, 4, 5, 6, b"data")
+        rpc.add_startup_parameter(7, 8, 9, 10, b"other")
+
+        with pytest.raises(PNIOError) as excinfo:
+            rpc.prm_end(send_startup_parameters=True)
+
+        assert excinfo.value.error_code == 0xDF
+        assert excinfo.value.error_decode == 0x80
+        assert excinfo.value.error_code1 == 0xB1
+        assert excinfo.value.error_code2 == 0x01
+        assert calls == []
 
 
 class TestCreateAlarmListener:

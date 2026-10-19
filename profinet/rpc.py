@@ -3211,7 +3211,8 @@ class RPCCon:
 
         Raises:
             RPCError: If control fails
-            PNIOError: If device returns PNIO error
+            PNIOError: If device returns PNIO error, or rejects a startup
+                record written before PrmEnd (PrmEnd is then not sent)
         """
         from .indices import BLOCK_IOD_CONTROL_PRM_END_REQ, CONTROL_CMD_PRM_END
 
@@ -3222,7 +3223,21 @@ class RPCCon:
                     for api, slot, subslot, index, data in self._startup_parameters
                 ]
                 if writes:
-                    self.write_multiple(writes)
+                    results = self.write_multiple(writes)
+                    # ArgsStatus can be 0 while individual records were rejected
+                    failed = next((r for r in results if not r.success), None)
+                    if failed is not None:
+                        error = PNIOError.from_bytes(failed.status.to_bytes(4, "big"))
+                        logger.error(
+                            f"Startup record 0x{failed.index:04X} at slot {failed.slot} "
+                            f"subslot {failed.subslot} rejected: {error}"
+                        )
+                        raise error
+                    if len(results) != len(writes):
+                        logger.warning(
+                            f"WriteMultiple returned {len(results)} results "
+                            f"for {len(writes)} startup records"
+                        )
             else:
                 for parameter in self._startup_parameters:
                     self.write(*parameter)

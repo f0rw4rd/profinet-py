@@ -175,6 +175,22 @@ def test_io_updates_are_applied_to_both_existing_ars():
         cyclic.set_output_data.assert_called_once_with(1, 4, b"same")
 
 
+def test_io_update_reaches_backup_when_primary_controller_faulted():
+    system = make_system_redundancy([MagicMock(), MagicMock()])
+    faulted_cyclic = MagicMock()
+    faulted_cyclic.set_output_data.side_effect = RuntimeError(
+        "Cannot set output data in fault state"
+    )
+    running_cyclic = MagicMock()
+    system.plcs[PLC.A].cyclic = faulted_cyclic
+    system.plcs[PLC.B].cyclic = running_cyclic
+
+    system.update_io(1, 4, b"new")
+
+    running_cyclic.set_output_data.assert_called_once_with(1, 4, b"new")
+    assert system._output_data[(1, 4)] == b"new"
+
+
 def test_io_updates_are_replayed_to_ars_connected_later():
     first_rpc = MagicMock()
     second_rpc = MagicMock()

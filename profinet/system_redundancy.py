@@ -540,12 +540,18 @@ class SystemRedundancy:
 
         Both the Primary and Backup AR retain the same output image so a
         subsequent switchover can continue with the current process data.
+        A controller in FAULT or STOPPED state is skipped; it receives the
+        image again when its AR is reconnected.
         """
         data = bytes(data)
         self._output_data[(slot, subslot)] = data
         for connection in self.plcs.values():
             if connection.cyclic is not None:
-                connection.cyclic.set_output_data(slot, subslot, data)
+                try:
+                    connection.cyclic.set_output_data(slot, subslot, data)
+                except RuntimeError as e:
+                    # One dead AR must not leave the other with stale outputs
+                    logger.debug(f"PLC {connection.name.value}: output update skipped: {e}")
 
     def update_io_status(self, slot: int, subslot: int, status: int = IOXS_GOOD) -> None:
         """Set the provider status (IOPS) for a submodule on every cyclic AR.

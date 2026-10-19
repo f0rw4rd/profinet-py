@@ -393,6 +393,7 @@ class SystemRedundancy:
         plc: PLC,
         online: bool,
         wait_for_slave_timeout: bool = False,
+        slave_timeout: float = 30.0,
     ) -> None:
         """Bring a PLC online or take it offline without a protocol shutdown.
 
@@ -405,6 +406,11 @@ class SystemRedundancy:
             online: True to recreate its RPC socket; False to take it offline.
             wait_for_slave_timeout: Keep its alarm listener running until the
                 slave reports an RTA ERROR after the AR timeout.
+            slave_timeout: Maximum seconds to wait for that RTA ERROR.
+
+        Raises:
+            RuntimeError: If no RTA ERROR arrives within ``slave_timeout``.
+                The PLC is offline and its resources are released anyway.
         """
         connection = self.plcs[self._normalize_plc(plc)]
         if connection.online == online:
@@ -437,8 +443,12 @@ class SystemRedundancy:
             survivor = self._active_primary()
             if survivor and survivor.cyclic and survivor.cyclic.is_running:
                 self._promote_and_reconfigure(survivor)
-            if timeout_event is not None:
-                timeout_event.wait()
+            # The RTA ERROR can be lost or never sent; never block forever on it
+            if timeout_event is not None and not timeout_event.wait(timeout=slave_timeout):
+                raise RuntimeError(
+                    f"No RTA ERROR from slave for PLC {connection.name.value} "
+                    f"within {slave_timeout}s"
+                )
         finally:
             if listener is not None and on_rta_error is not None:
                 listener.remove_rta_error_callback(on_rta_error)

@@ -585,9 +585,10 @@ def test_offline_can_wait_for_slave_timeout_before_stopping_alarm_listener():
         def set(self):
             pass
 
-        def wait(self):
+        def wait(self, timeout=None):
             events.append("wait_for_timeout_alarm")
             registered_callbacks[0](5)
+            return True
 
     with (
         patch.object(
@@ -610,6 +611,29 @@ def test_offline_can_wait_for_slave_timeout_before_stopping_alarm_listener():
     listener.add_rta_error_callback.assert_called_once_with(registered_callbacks[0])
     cyclic.stop.assert_called_once_with(send_stop_frames=False)
     rpc_a.close.assert_called_once_with(send_release=False)
+    assert system.plcs[PLC.A].rpc is None
+    assert system.plcs[PLC.A].alarm_listener is None
+
+
+def test_offline_wait_for_slave_timeout_gives_up_and_still_cleans_up():
+    rpc_a = MagicMock()
+    system = make_system_redundancy([rpc_a, MagicMock()])
+    listener = MagicMock()
+    listener.is_running = True
+    system.plcs[PLC.A].cyclic = MagicMock()
+    system.plcs[PLC.A].alarm_listener = listener
+
+    try:
+        system.set_online(PLC.A, False, wait_for_slave_timeout=True, slave_timeout=0.05)
+    except RuntimeError as error:
+        assert "RTA ERROR" in str(error)
+    else:
+        raise AssertionError("a missing RTA ERROR must end the wait with an error")
+
+    listener.remove_rta_error_callback.assert_called_once()
+    listener.stop.assert_called_once_with()
+    rpc_a.close.assert_called_once_with(send_release=False)
+    assert not system.plcs[PLC.A].online
     assert system.plcs[PLC.A].rpc is None
     assert system.plcs[PLC.A].alarm_listener is None
 

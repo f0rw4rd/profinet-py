@@ -1422,18 +1422,40 @@ class SubmoduleListBlock:
 
     @classmethod
     def from_bytes(cls, data: bytes) -> "SubmoduleListBlock":
-        """Parse SubmoduleListBlock from raw bytes."""
+        """Parse SubmoduleListBlock from raw bytes.
+
+        Raises:
+            ValueError: If the block type is not 0x0119, the data is shorter
+                than block_length says, or NumberOfEntries disagrees with
+                block_length
+        """
         if len(data) < 8:
             raise ValueError(f"SubmoduleListBlock data too short: {len(data)} bytes")
 
-        offset = 6  # skip 6-byte PNBlockHeader
+        header, offset = parse_block_header(data)
+        if header.block_type != cls.BLOCK_TYPE:
+            raise ValueError(
+                f"Expected block type 0x{cls.BLOCK_TYPE:04X}, got 0x{header.block_type:04X}"
+            )
+        # block_length counts from the version bytes: version(2) + count(2) + N * 8
+        if header.block_length < 4:
+            raise ValueError(f"SubmoduleListBlock block_length {header.block_length} below 4")
+        end = 4 + header.block_length
+        if end > len(data):
+            raise ValueError(
+                f"SubmoduleListBlock truncated: block_length needs {end} bytes, got {len(data)}"
+            )
+
         num_entries = UInt16ubStruct.parse(data[offset : offset + 2]).value
         offset += 2
+        if offset + num_entries * 8 != end:
+            raise ValueError(
+                f"SubmoduleListBlock NumberOfEntries {num_entries} does not match "
+                f"block_length {header.block_length}"
+            )
 
         entries = []
         for _ in range(num_entries):
-            if offset + 8 > len(data):
-                break
             entry = SubmoduleListEntryStruct.parse(data[offset : offset + 8])
             entries.append(
                 SubmoduleListEntry(

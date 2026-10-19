@@ -93,6 +93,33 @@ class TestSubmoduleListBlock:
         decoded = blocks.SubmoduleListBlock.from_bytes(encoded)
         assert decoded.entries == [blocks.SubmoduleListEntry(0x3A00, 1, 4)]
 
+    def test_parse_empty_list(self):
+        decoded = blocks.SubmoduleListBlock.from_bytes(bytes.fromhex("0119000401000000"))
+        assert decoded.entries == []
+
+    def test_parse_rejects_short_header(self):
+        with pytest.raises(ValueError, match="too short"):
+            blocks.SubmoduleListBlock.from_bytes(bytes.fromhex("0119000401"))
+
+    def test_parse_rejects_other_block_type(self):
+        # Valid layout, but block type 0x0118 instead of 0x0119
+        with pytest.raises(ValueError, match="block type"):
+            blocks.SubmoduleListBlock.from_bytes(bytes.fromhex("0118000c0100000100003a0000010004"))
+
+    def test_parse_rejects_entries_cut_short(self):
+        # Header and count claim two entries, only one is present
+        with pytest.raises(ValueError, match="truncated"):
+            blocks.SubmoduleListBlock.from_bytes(bytes.fromhex("011900140100000200003a0000010004"))
+
+    def test_parse_rejects_count_disagreeing_with_block_length(self):
+        # block_length covers one entry, NumberOfEntries claims two
+        with pytest.raises(ValueError, match="NumberOfEntries"):
+            blocks.SubmoduleListBlock.from_bytes(bytes.fromhex("0119000c0100000200003a0000010004"))
+
+    def test_parse_rejects_block_length_below_body_minimum(self):
+        with pytest.raises(ValueError, match="block_length"):
+            blocks.SubmoduleListBlock.from_bytes(bytes.fromhex("0119000201000000"))
+
 
 class TestPDInterfaceDataReal:
     """Tests for PDInterfaceDataReal (0x0240) parsing."""

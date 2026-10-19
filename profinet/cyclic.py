@@ -44,6 +44,7 @@ and is not achievable in pure Python.
 from __future__ import annotations
 
 import enum
+import inspect
 import logging
 import socket
 import threading
@@ -72,6 +73,22 @@ from .util import ethernet_socket as _ethernet_socket
 from .util import skip_vlan_tags
 
 logger = logging.getLogger(__name__)
+
+
+def _apdu_status_callback(callback: Callable[..., None]) -> Callable[[Optional[int], int], None]:
+    """Normalize a slave APDU status callback to ``(old_status, new_status)``.
+
+    The arity is decided once at registration. Probing it per frame by
+    catching TypeError re-ran a two-argument callback whose own body raised
+    TypeError, with shifted arguments.
+    """
+    try:
+        inspect.signature(callback).bind(None, None)
+    except TypeError:
+        return lambda _old, new: callback(new)
+    except ValueError:
+        pass  # no introspectable signature: assume (old, new)
+    return callback
 
 
 class CyclicState(enum.Enum):
@@ -328,7 +345,7 @@ class CyclicController:
         self._on_input_data: Optional[Callable[[int, int, bytes], None]] = None
         self._on_data_change: Optional[Callable[..., None]] = None
         self._on_input_status: Optional[Callable[[int, int, int], None]] = None
-        self._on_slave_apdu_status: Optional[Callable[..., None]] = None
+        self._on_slave_apdu_status: Optional[Callable[[Optional[int], int], None]] = None
         self._on_timeout: Optional[Callable[[], None]] = None
         self._on_error: Optional[Callable[[str], None]] = None
         self._on_state_change: Optional[Callable[[CyclicState, CyclicState], None]] = None
@@ -671,15 +688,15 @@ class CyclicController:
         Args:
             callback: Function called on slave APDU status change
         """
-        self._on_slave_apdu_status = callback
+        self._on_slave_apdu_status = _apdu_status_callback(callback)
 
     def on_input_apdu_status(self, callback: Callable[..., None]) -> None:
         """Alias for on_slave_apdu_status."""
-        self._on_slave_apdu_status = callback
+        self.on_slave_apdu_status(callback)
 
     def on_apdu_status_change(self, callback: Callable[..., None]) -> None:
         """Alias for on_slave_apdu_status."""
-        self._on_slave_apdu_status = callback
+        self.on_slave_apdu_status(callback)
 
     def on_timeout(self, callback: Callable[[], None]) -> None:
         """Register callback for watchdog timeout.
@@ -1095,11 +1112,6 @@ class CyclicController:
             old_s, new_s = apdu_event
             try:
                 self._on_slave_apdu_status(old_s, new_s)
-            except TypeError:
-                try:
-                    self._on_slave_apdu_status(new_s)
-                except Exception as e:
-                    logger.error(f"Slave APDU status callback error: {e}")
             except Exception as e:
                 logger.error(f"Slave APDU status callback error: {e}")
 

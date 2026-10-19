@@ -553,6 +553,42 @@ class TestInputFrameProcessing:
         assert ctrl.get_input_data(2, 1, allow_bad=True) is None
         assert ctrl.get_input_status(2, 1) is None
 
+    def test_slave_apdu_callback_receives_old_and_new_status(self):
+        ctrl = make_controller()
+        ctrl._state = CyclicState.RUNNING
+        calls = []
+        ctrl.on_slave_apdu_status(lambda old, new: calls.append((old, new)))
+
+        ctrl._process_input_frame(self._build_eth_frame(ctrl, 1, data_status=0x35))
+        ctrl._process_input_frame(self._build_eth_frame(ctrl, 2, data_status=0x34))
+
+        assert calls == [(None, 0x35), (0x35, 0x34)]
+
+    def test_slave_apdu_callback_with_one_argument_receives_new_status(self):
+        ctrl = make_controller()
+        ctrl._state = CyclicState.RUNNING
+        calls = []
+        ctrl.on_apdu_status_change(lambda new: calls.append(new))
+
+        ctrl._process_input_frame(self._build_eth_frame(ctrl, 1, data_status=0x35))
+
+        assert calls == [0x35]
+
+    def test_slave_apdu_callback_type_error_is_not_retried(self):
+        ctrl = make_controller()
+        ctrl._state = CyclicState.RUNNING
+        calls = []
+
+        def callback(old, new=None):
+            calls.append((old, new))
+            raise TypeError("bug inside the callback")
+
+        ctrl.on_slave_apdu_status(callback)
+        ctrl._process_input_frame(self._build_eth_frame(ctrl, 1, data_status=0x35))
+
+        assert calls == [(None, 0x35)]
+        assert ctrl.stats.frames_received == 1
+
 
 # =============================================================================
 # CyclicController - Misc

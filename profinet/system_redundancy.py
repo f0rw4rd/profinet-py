@@ -25,6 +25,7 @@ from .cyclic import (
     CyclicState,
     _apdu_status_callback,
 )
+from .exceptions import ValidationError
 from .rpc import DEFAULT_TIMEOUT, ConnectResult, IOCRSetup, RPCCon, SRInfoConfig
 from .rt import IOXS_GOOD, build_iocr_configs
 from .util import get_mac, s2mac
@@ -117,12 +118,12 @@ class SystemRedundancy:
                 dst_mac = bytes(raw_mac)
 
         if primary_ip is None or secondary_ip is None:
-            raise ValueError("Both primary_ip and secondary_ip must be provided.")
+            raise ValidationError("Both primary_ip and secondary_ip must be provided.")
 
         device_network = ipaddress.IPv4Network((info.ip, info.netmask), strict=False)
         for plc_name, plc_ip in ((PLC.A, primary_ip), (PLC.B, secondary_ip)):
             if ipaddress.IPv4Address(plc_ip) not in device_network:
-                raise ValueError(
+                raise ValidationError(
                     f"PLC {plc_name.value} IP {plc_ip} is not in device subnet "
                     f"{device_network} (device {info.ip}, netmask {info.netmask})"
                 )
@@ -826,7 +827,7 @@ class SystemRedundancy:
         if target is not None:
             target = self._normalize_plc(target)
             if not self.plcs[target].online:
-                raise ValueError(f"Cannot make offline PLC {target.value} primary")
+                raise ValidationError(f"Cannot make offline PLC {target.value} primary")
             for connection in connections:
                 cyclic = connection.cyclic
                 if cyclic is not None and cyclic.is_primary != (connection.name == target):

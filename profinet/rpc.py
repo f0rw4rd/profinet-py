@@ -659,15 +659,15 @@ class SRInfoConfig:
 
     def __post_init__(self) -> None:
         if not (1 <= self.ar_number <= 7):
-            raise ValueError(f"ar_number must be between 1 and 7, got {self.ar_number}")
+            raise ValidationError(f"ar_number must be between 1 and 7, got {self.ar_number}")
         if not self.discriminator:
             self.discriminator = os.urandom(6)
         elif len(self.discriminator) != 6:
-            raise ValueError(f"discriminator must be 6 bytes, got {len(self.discriminator)}")
+            raise ValidationError(f"discriminator must be 6 bytes, got {len(self.discriminator)}")
         if not self.config_id:
             self.config_id = os.urandom(8)
         elif len(self.config_id) != 8:
-            raise ValueError(f"config_id must be 8 bytes, got {len(self.config_id)}")
+            raise ValidationError(f"config_id must be 8 bytes, got {len(self.config_id)}")
 
     @property
     def ar_uuid(self) -> bytes:
@@ -688,7 +688,7 @@ class SRInfoConfig:
             Tuple of (sr_info_1st, sr_info_2nd)
         """
         if redundancy_data_hold_factor < 3:
-            raise ValueError(
+            raise ValidationError(
                 f"redundancy_data_hold_factor must be >= 3, got {redundancy_data_hold_factor}"
             )
 
@@ -1046,7 +1046,7 @@ class RPCCon:
             alarm_ref: Controller's local AlarmCR endpoint reference
         """
         if not (1 <= alarm_ref <= 0xFFFF):
-            raise ValueError("alarm_ref must be between 1 and 65535")
+            raise ValidationError("alarm_ref must be between 1 and 65535")
 
         self.info = info
         self.timeout = timeout

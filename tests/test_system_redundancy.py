@@ -2,6 +2,7 @@ import threading
 from unittest.mock import MagicMock, call, patch
 
 from profinet.dcp import DCPDeviceDescription
+from profinet.exceptions import ValidationError
 from profinet.rpc import ConnectResult, IOCRSetup
 from profinet.system_redundancy import PLC, SystemRedundancy
 
@@ -32,7 +33,7 @@ def test_plc_ips_must_match_device_subnet():
                 primary_ip="192.0.3.1",
                 secondary_ip="192.0.2.2",
             )
-        except ValueError as error:
+        except ValidationError as error:
             assert "PLC A IP 192.0.3.1" in str(error)
             assert "192.0.2.0/24" in str(error)
         else:
@@ -49,7 +50,7 @@ def test_secondary_plc_ip_must_match_device_subnet():
                 primary_ip="192.0.2.1",
                 secondary_ip="192.0.3.2",
             )
-        except ValueError as error:
+        except ValidationError as error:
             assert "PLC B IP 192.0.3.2" in str(error)
         else:
             raise AssertionError("PLC IP outside the device subnet must be rejected")

@@ -113,6 +113,17 @@ def test_connect_only_populates_selected_ar():
     assert system.plcs[PLC.B].cyclic is None
 
 
+def test_connect_rejects_selected_offline_plc():
+    system = make_system_redundancy([MagicMock()], online_plcs={PLC.A})
+
+    try:
+        system.connect(plc=PLC.B)
+    except ValidationError as error:
+        assert "PLC B is offline" in str(error)
+    else:
+        raise AssertionError("connecting an offline PLC must not silently do nothing")
+
+
 def test_reconnect_discards_dropped_ar_and_restarts_as_backup():
     rpc = MagicMock()
     rpc._alarm_cr_enabled = False

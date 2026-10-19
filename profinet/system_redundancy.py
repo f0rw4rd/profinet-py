@@ -301,7 +301,13 @@ class SystemRedundancy:
 
         Returns:
             The selected AR's result, or the last result when connecting both.
+
+        Raises:
+            ValidationError: If the selected PLC is offline; bring it online
+                with :meth:`set_online` first.
         """
+        if plc is not None and not self.plcs[self._normalize_plc(plc)].online:
+            raise ValidationError(f"Cannot connect: PLC {plc.value} is offline")
 
         w_alarm = self.with_alarm_cr if with_alarm_cr is None else with_alarm_cr
         setup = iocr_setup or self.iocr_setup

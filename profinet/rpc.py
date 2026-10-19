@@ -645,7 +645,8 @@ class SRInfoConfig:
     """
 
     ar_number: int = 1
-    """AR number (1 = 1st AR, 2 = 2nd AR, etc. Stored in ARUUID Selector bits 0-2). Mandatory for System Redundancy."""
+    """AR number within the AR set, 1..4 (1 = 1st AR, 2 = 2nd AR). Stored in ARUUID Selector
+    bits 0-2; 0 and 5..7 are reserved. Mandatory for System Redundancy."""
 
     discriminator: bytes = b""
     """6-byte discriminator part of System Redundancy ARUUID. Auto-generated if empty."""
@@ -658,8 +659,9 @@ class SRInfoConfig:
     This is information sent to devices. Not enforced by this implementation!"""
 
     def __post_init__(self) -> None:
-        if not (1 <= self.ar_number <= 7):
-            raise ValidationError(f"ar_number must be between 1 and 7, got {self.ar_number}")
+        # Wireshark pn_io_ar_arnumber: 1st..4th AR of an ARset, 0 and 5+ reserved
+        if not (1 <= self.ar_number <= 4):
+            raise ValidationError(f"ar_number must be between 1 and 4, got {self.ar_number}")
         if not self.discriminator:
             self.discriminator = os.urandom(6)
         elif len(self.discriminator) != 6:

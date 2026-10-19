@@ -3552,6 +3552,12 @@ class RPCCon:
         Args:
             wait_for_response: Wait for IODReleaseRes using the configured
                 timeout instead of sending Release without waiting.
+
+        Raises:
+            RPCError: With ``wait_for_response`` only, if the Release is not
+                answered or the device rejects it (PNIOError). The AR is
+                marked as not live either way. Without it, Release is best
+                effort and errors are only logged.
         """
         if not self.live:
             return  # Not connected
@@ -3585,10 +3591,13 @@ class RPCCon:
                 logger.debug(f"Sent Release to {self.info.name} without waiting")
 
         except Exception as e:
+            if wait_for_response:
+                raise
             logger.debug(f"Release failed: {e}")
 
-        self.live = None
-        self._live_monotonic = None
+        finally:
+            self.live = None
+            self._live_monotonic = None
 
     def close(self, send_release: bool = True) -> None:
         """Close RPC sockets, optionally sending Release first.

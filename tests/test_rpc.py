@@ -12,7 +12,7 @@ sys.path.insert(0, ".")
 
 from profinet.blocks import WriteMultipleResult
 from profinet.dcp import DCPDeviceDescription
-from profinet.exceptions import PNIOError
+from profinet.exceptions import PNIOError, RPCTimeoutError
 from profinet.protocol import PNBlockHeader, PNDCPBlock, PNIODReleaseBlock
 from profinet.rpc import (
     MAU_TYPES,
@@ -1433,6 +1433,48 @@ class TestDisconnectTimeout:
         assert observed_timeouts == [7.0]
         assert rpc.timeout == 7.0
         rpc._socket.settimeout.assert_not_called()
+
+    def test_disconnect_wait_for_response_raises_on_release_error(self):
+        from types import SimpleNamespace
+
+        rpc = object.__new__(RPCCon)
+        rpc.live = True
+        rpc._live_monotonic = 1.0
+        rpc.ar_uuid = bytes(16)
+        rpc.session_key = 1
+        rpc.info = SimpleNamespace(name="test-device")
+        rpc._create_nrd = MagicMock(return_value=b"nrd")
+        rpc._create_rpc = MagicMock(return_value=object())
+        rpc._send_receive = MagicMock(return_value=SimpleNamespace(payload=b"response"))
+
+        # ArgsStatus as parsed big-endian from the little-endian wire field:
+        # IOD Release error (0xDC), PNIO-CM decode (0x40)
+        nrd = SimpleNamespace(args_maximum_status=0x010540DC)
+        with patch("profinet.rpc.PNNRDData", return_value=nrd):
+            with pytest.raises(PNIOError) as excinfo:
+                rpc.disconnect(wait_for_response=True)
+
+        assert excinfo.value.error_code == 0xDC
+        assert rpc.live is None
+        assert rpc._live_monotonic is None
+
+    def test_disconnect_wait_for_response_raises_on_timeout(self):
+        from types import SimpleNamespace
+
+        rpc = object.__new__(RPCCon)
+        rpc.live = True
+        rpc._live_monotonic = 1.0
+        rpc.ar_uuid = bytes(16)
+        rpc.session_key = 1
+        rpc.info = SimpleNamespace(name="test-device")
+        rpc._create_nrd = MagicMock(return_value=b"nrd")
+        rpc._create_rpc = MagicMock(return_value=object())
+        rpc._send_receive = MagicMock(side_effect=RPCTimeoutError("no response"))
+
+        with pytest.raises(RPCTimeoutError):
+            rpc.disconnect(wait_for_response=True)
+
+        assert rpc.live is None
 
     def test_disconnect_does_not_wait_by_default(self):
         rpc = object.__new__(RPCCon)

@@ -58,6 +58,18 @@ def test_secondary_plc_ip_must_match_device_subnet():
         rpc_con.assert_not_called()
 
 
+def test_plc_ips_must_differ():
+    with patch("profinet.system_redundancy.RPCCon") as rpc_con:
+        try:
+            make_system_redundancy([], primary_ip="192.0.2.1", secondary_ip="192.0.2.1")
+        except ValidationError as error:
+            assert "192.0.2.1" in str(error)
+        else:
+            raise AssertionError("identical PLC IPs must be rejected")
+
+        rpc_con.assert_not_called()
+
+
 def test_plc_resources_are_grouped_per_connection():
     first_rpc = MagicMock()
     second_rpc = MagicMock()

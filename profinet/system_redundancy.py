@@ -127,6 +127,13 @@ class SystemRedundancy:
                     f"PLC {plc_name.value} IP {plc_ip} is not in device subnet "
                     f"{device_network} (device {info.ip}, netmask {info.netmask})"
                 )
+        # Both RPCCon instances bind their CControl socket to (ip, RPC_PORT)
+        # with SO_REUSEADDR; one IP would deliver either AR's CControl to
+        # either socket
+        if ipaddress.IPv4Address(primary_ip) == ipaddress.IPv4Address(secondary_ip):
+            raise ValidationError(
+                f"PLC A and PLC B need distinct IP addresses, both are {primary_ip}"
+            )
 
         sr_info_by_ar = dict(
             enumerate(

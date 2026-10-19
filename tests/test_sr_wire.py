@@ -23,6 +23,7 @@ from unittest.mock import patch
 import pytest
 
 import profinet.rpc as rpc_module
+from profinet.exceptions import ValidationError
 
 if not hasattr(rpc_module, "SRInfoConfig"):
     pytest.skip("library has no System Redundancy support", allow_module_level=True)
@@ -93,12 +94,12 @@ class TestCaptureVectors:
 class TestSpecRanges:
     @pytest.mark.parametrize("ar_number", [0, 5, 7])
     def test_ar_number_outside_1_to_4_rejected(self, ar_number):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValidationError):
             SRInfoConfig(ar_number=ar_number)
 
     @pytest.mark.parametrize("rdhf", [0, 1, 2])
     def test_reserved_redundancy_data_hold_factor_rejected(self, rdhf):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValidationError):
             SRInfoConfig(redundancy_data_hold_factor=rdhf)
 
 

@@ -122,10 +122,6 @@ class TestRecordRequests:
         assert ints(layers, "pn_io.index") == [0x0100]
         assert ints(layers, "pn_io.record_data_length") == [2]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="write_multiple wraps the 0xE040 IODWriteReqHeader twice; fix proposed in #27",
-    )
     def test_write_multiple(self, rpc, tmp_path):
         writes = [(1, 1, 0x0100, b"\x01\x02", 0), (1, 1, 0x0101, b"\x03", 0)]
         sent = capture_requests(_live(rpc), lambda: rpc.write_multiple(writes))

@@ -1334,8 +1334,10 @@ class RPCCon:
         # Pad to minimum 40 bytes
         data_length = max(40, frame_offset)
 
-        # IOCR properties: RT_CLASS_1 = 0x01
-        iocr_properties = 0x00000001  # RT_CLASS_1
+        # IOCR properties: RT_CLASS_1 for Legacy startup. Advanced startup
+        # (IOCARSR) only allows RTClass 2..5 (PN 2.4 Table "IOCRBlockReq",
+        # enforced by p-net pf_cmdev.c), so use RT_CLASS_2 there.
+        iocr_properties = indices.IOCR_RT_CLASS_2 if sr_info else indices.IOCR_RT_CLASS_1
 
         # Build IOCRAPI per IEC 61158-6-10:
         # API(4) + nbr_io_data(2) + io_data[] + nbr_iocs(2) + iocs[]
@@ -1360,13 +1362,13 @@ class RPCCon:
             0x00,  # version low
         )
 
-        # RT_CLASS_1 frame IDs: the controller proposes the input CR
-        # frame ID in the RTC1 range (0xC000-0xF7FF); for the output CR
-        # it sends 0xFFFF and the device assigns the real frame ID,
-        # returned in the IOCRBlockRes of the Connect response.
+        # The controller proposes the input CR frame ID in the range of
+        # its RT class (RT_CLASS_1: 0xC000-0xF7FF, RT_CLASS_2: 0x8000-0xBBFF);
+        # for the output CR it sends 0xFFFF and the device assigns the real
+        # frame ID, returned in the IOCRBlockRes of the Connect response.
         frame_id = 0xFFFF
         if iocr_type == IOCR_TYPE_INPUT:
-            frame_id = 0xC000 + iocr_reference
+            frame_id = (0x8000 if sr_info else 0xC000) + iocr_reference
             if sr_info:
                 # For System Redundancy, differentiate the FrameIds
                 frame_id += sr_info.ar_number - 1
@@ -1664,6 +1666,12 @@ class RPCCon:
             # Device access AR (no cyclic, just read/write):
             # State=Active(1), PrmServer=CM_Initiator(bit4), DeviceAccess=1(bit8)
             ar_properties = 0x00000111
+        if sr_info is not None:
+            # IOCARSR is an Advanced startup AR (StartupMode bit 30), as in
+            # captured IOCARSR Connects. CombinedObjectContainer (bit 29)
+            # stays clear: in Advanced mode it demands COC records, which
+            # this library does not send.
+            ar_properties |= 0x40000000
 
         block = PNBlockHeader(
             0x0101,  # ARBlockReq

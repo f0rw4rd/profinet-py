@@ -137,7 +137,7 @@ class TestConnectDecode:
         assert ints(layers, "pn_io.RedundancyDataHoldFactor") == [150]
         assert ints(layers, "pn_io.sr_properties") == [0]
 
-    def test_ar_properties_match_capture(self, rpc, tmp_path):
+    def test_ar_properties_use_advanced_startup(self, rpc, tmp_path):
         sent = capture_requests(
             rpc,
             lambda: rpc.connect(
@@ -147,9 +147,44 @@ class TestConnectDecode:
         pcap = write_pcap(tmp_path / "connect.pcap", [wrap_udp(sent[0])])
 
         (layers,) = dissect(pcap, ["pn_io.ar_properties"])
-        # StartupMode Advanced (bit 30) + CombinedObjectContainer (bit 29),
-        # as in the captured IOCARSR Connect
-        assert ints(layers, "pn_io.ar_properties") == [CAPTURE_AR_PROPERTIES]
+        # The captured IOCARSR Connect also sets CombinedObjectContainer
+        # (bit 29), which in Advanced mode means "usage of COC required".
+        # The library sends no COC records, so it must leave that bit clear;
+        # frames 65 and 67 of the same capture use 0x40000011 likewise.
+        assert ints(layers, "pn_io.ar_properties") == [CAPTURE_AR_PROPERTIES & ~(1 << 29)]
+
+    def test_iocrs_use_rt_class_2_frame_ids(self, rpc, tmp_path):
+        sent = capture_requests(
+            rpc,
+            lambda: rpc.connect(
+                src_mac=CONTROLLER_MAC, iocr_setup=IOCR_SETUP, sr_info=_capture_sr()
+            ),
+        )
+        pcap = write_pcap(tmp_path / "connect.pcap", [wrap_udp(sent[0])])
+
+        assert expert_errors(pcap) == []
+        (layers,) = dissect(pcap, ["pn_io.iocr_type", "pn_io.iocr_properties", "pn_io.frame_id"])
+        # Advanced startup allows RTClass 2..5 only (p-net pf_cmdev.c, PN 2.4
+        # Table "IOCRBlockReq"); the capture sends 0x00000002 on both IOCRs,
+        # proposes input FrameID 0x8000 and leaves the output to the device
+        assert ints(layers, "pn_io.iocr_type") == [1, 2]
+        assert ints(layers, "pn_io.iocr_properties") == [0x00000002, 0x00000002]
+        input_frame_id, output_frame_id = ints(layers, "pn_io.frame_id")
+        assert 0x8000 <= input_frame_id <= 0xBBFF
+        assert output_frame_id == 0xFFFF
+
+    def test_plain_iocar_keeps_legacy_startup_and_rt_class_1(self, rpc, tmp_path):
+        sent = capture_requests(
+            rpc, lambda: rpc.connect(src_mac=CONTROLLER_MAC, iocr_setup=IOCR_SETUP)
+        )
+        pcap = write_pcap(tmp_path / "connect.pcap", [wrap_udp(sent[0])])
+
+        (layers,) = dissect(
+            pcap, ["pn_io.ar_properties", "pn_io.iocr_properties", "pn_io.frame_id"]
+        )
+        assert ints(layers, "pn_io.ar_properties") == [0x00000011]
+        assert ints(layers, "pn_io.iocr_properties") == [0x00000001, 0x00000001]
+        assert 0xC000 <= ints(layers, "pn_io.frame_id")[0] <= 0xF7FF
 
 
 @requires_tshark

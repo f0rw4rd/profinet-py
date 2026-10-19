@@ -4,6 +4,7 @@ The `SystemRedundancy` class coordinates two redundant IO-Controllers (`PLC.A` a
 
 ## What It Abstracts
 
+- **IOCARSR Connect**: Each AR is an `IOCARSR` (ARType 0x0020) with an SRInfoBlock, Advanced startup mode (ARProperties bit 30) and RT_CLASS_2 IOCRs (input FrameID proposed in 0x8000-0xBBFF); plain `RPCCon.connect()` without `sr_info` keeps Legacy startup and RT_CLASS_1.
 - **Dual-AR Lifecycle Management**: Manages two independent IP endpoints, RPC sessions (`RPCCon`), cyclic RT controllers (`CyclicController`), and alarm listeners behind a unified controller pair.
 - **Redundancy Role State Machine**:
   - Always connects new ARs with the **Backup** role (`DataStatus` bit 0 = 0).

@@ -275,7 +275,7 @@ IOCR_TYPE_NAMES: Dict[int, str] = {
 
 # IOCR RT Classes (bits 0-3 of IOCRProperties)
 IOCR_RT_CLASS_1 = 0x01  # RT_CLASS_1 (non-IRT, software scheduling)
-IOCR_RT_CLASS_2 = 0x02  # RT_CLASS_2 (reserved)
+IOCR_RT_CLASS_2 = 0x02  # RT_CLASS_2 (RT frames, used with Advanced startup)
 IOCR_RT_CLASS_3 = 0x03  # RT_CLASS_3 (IRT, hardware scheduling)
 IOCR_RT_CLASS_UDP = 0x04  # RT_CLASS_UDP (UDP-based RT)
 

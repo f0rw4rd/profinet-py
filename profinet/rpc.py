@@ -668,6 +668,12 @@ class SRInfoConfig:
             self.config_id = os.urandom(8)
         elif len(self.config_id) != 8:
             raise ValidationError(f"config_id must be 8 bytes, got {len(self.config_id)}")
+        # Unsigned16 on the wire (SRInfoBlock in protocol.py); values below 3 are invalid
+        if not (3 <= self.redundancy_data_hold_factor <= 0xFFFF):
+            raise ValidationError(
+                "redundancy_data_hold_factor must be between 3 and 65535, "
+                f"got {self.redundancy_data_hold_factor}"
+            )
 
     @property
     def ar_uuid(self) -> bytes:
@@ -687,11 +693,6 @@ class SRInfoConfig:
         Returns:
             Tuple of (sr_info_1st, sr_info_2nd)
         """
-        if redundancy_data_hold_factor < 3:
-            raise ValidationError(
-                f"redundancy_data_hold_factor must be >= 3, got {redundancy_data_hold_factor}"
-            )
-
         disc = discriminator or os.urandom(6)
         cid = config_id or os.urandom(8)
         first = cls(

@@ -12,7 +12,7 @@ sys.path.insert(0, ".")
 
 from profinet.blocks import WriteMultipleResult
 from profinet.dcp import DCPDeviceDescription
-from profinet.exceptions import PNIOError, RPCTimeoutError
+from profinet.exceptions import PNIOError, RPCTimeoutError, ValidationError
 from profinet.protocol import PNBlockHeader, PNDCPBlock, PNIODReleaseBlock
 from profinet.rpc import (
     MAU_TYPES,
@@ -24,6 +24,7 @@ from profinet.rpc import (
     PortInfo,
     PortStatistics,
     RPCCon,
+    SRInfoConfig,
     get_station_info,
 )
 
@@ -767,6 +768,26 @@ class TestStartupParameters:
         assert excinfo.value.error_code1 == 0xB1
         assert excinfo.value.error_code2 == 0x01
         assert calls == []
+
+
+class TestSRInfoConfig:
+    @pytest.mark.parametrize("factor", [0, 2, 0x10000])
+    def test_rejects_hold_factor_outside_unsigned16_minimum_3(self, factor):
+        with pytest.raises(ValidationError, match="redundancy_data_hold_factor"):
+            SRInfoConfig(redundancy_data_hold_factor=factor)
+
+    @pytest.mark.parametrize("factor", [3, 0xFFFF])
+    def test_accepts_hold_factor_bounds(self, factor):
+        assert SRInfoConfig(redundancy_data_hold_factor=factor).redundancy_data_hold_factor == (
+            factor
+        )
+
+    def test_create_pair_shares_aruuid_base(self):
+        first, second = SRInfoConfig.create_pair(redundancy_data_hold_factor=3)
+        assert (first.ar_number, second.ar_number) == (1, 2)
+        assert first.ar_uuid[:14] == second.ar_uuid[:14]
+        with pytest.raises(ValidationError, match="redundancy_data_hold_factor"):
+            SRInfoConfig.create_pair(redundancy_data_hold_factor=2)
 
 
 class TestCreateAlarmListener:

@@ -75,6 +75,12 @@ class TestMultipleBlockHeader:
         assert slot == 2
         assert subslot == 1
 
+    def test_parse_multiple_block_header_truncated(self):
+        """Test error on truncated data."""
+        data = b"\x00\x00\x00\x00"  # Only 4 bytes
+        with pytest.raises(ValueError, match="requires 8 bytes"):
+            blocks.parse_multiple_block_header(data)
+
 
 class TestSubmoduleListBlock:
     def test_construct_serialization_and_parsing(self):
@@ -86,12 +92,6 @@ class TestSubmoduleListBlock:
         assert encoded == bytes.fromhex("0119000c0100000100003a0000010004")
         decoded = blocks.SubmoduleListBlock.from_bytes(encoded)
         assert decoded.entries == [blocks.SubmoduleListEntry(0x3A00, 1, 4)]
-
-    def test_parse_multiple_block_header_truncated(self):
-        """Test error on truncated data."""
-        data = b"\x00\x00\x00\x00"  # Only 4 bytes
-        with pytest.raises(ValueError, match="requires 8 bytes"):
-            blocks.parse_multiple_block_header(data)
 
 
 class TestPDInterfaceDataReal:

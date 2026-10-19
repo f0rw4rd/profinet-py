@@ -582,7 +582,6 @@ class SystemRedundancy:
         plc: PLC,
         primary: bool,
         timeout: float,
-        report: bool = False,
     ) -> None:
         expected_state = 1 if primary else 0
         status = cyclic.slave_apdu_status
@@ -592,9 +591,7 @@ class SystemRedundancy:
             f"(current={f'0x{status:02X}' if status is not None else 'none'})"
         )
         if status is not None and (status & 0x01) == expected_state:
-            logger.debug(f"PLC {plc.value}: slave APDU already reports {role}")
-            if report:
-                print(f"    PLC {plc.value}: acknowledged {role}")
+            logger.info(f"PLC {plc.value}: slave APDU already reports {role}")
             return
 
         event = threading.Event()
@@ -606,9 +603,7 @@ class SystemRedundancy:
                 f"{f'0x{new_status:02X}' if new_status is not None else 'none'}"
             )
             if (new_status & 0x01) == expected_state:
-                logger.debug(f"PLC {plc.value}: slave acknowledged {role}")
-                if report:
-                    print(f"    PLC {plc.value}: acknowledged {role}")
+                logger.info(f"PLC {plc.value}: slave acknowledged {role}")
                 event.set()
 
         waiter = (cyclic, on_status_change)
@@ -870,7 +865,6 @@ class SystemRedundancy:
                     connection.name,
                     primary=expected_primary,
                     timeout=ack_timeout,
-                    report=True,
                 )
 
     # --- Callbacks wiring ---

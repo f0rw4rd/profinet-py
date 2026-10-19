@@ -127,6 +127,7 @@ def main():
 
         print("[5] Switching over to PLC B...")
         sys_red.switchover(target=PLC.B, wait_for_ack=True)
+        print("    PLC B acknowledged as Primary, PLC A as Backup")
     finally:
         print("[6] Stopping cyclic IO and closing connections...")
         sys_red.close()

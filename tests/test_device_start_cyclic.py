@@ -109,6 +109,27 @@ class TestStartCyclicOrdering:
         assert device._connected is True
 
 
+class TestStartCyclicAbortWiring:
+    def test_listener_abort_is_forwarded_to_the_controller(self):
+        h = Harness()
+        device = make_device()
+        listener = MagicMock()
+        device.start_alarm_listener = lambda: setattr(device, "_alarm_listener", listener)
+
+        h.start_cyclic(device, start_alarm_listener=True)
+
+        listener.add_abort_callback.assert_called_once_with(h.cyclic.notify_ar_abort)
+
+    def test_no_abort_wiring_without_an_alarm_listener(self):
+        h = Harness()
+        device = make_device()
+
+        h.start_cyclic(device, start_alarm_listener=False)
+
+        h.cyclic.notify_ar_abort.assert_not_called()
+        assert device._alarm_listener is None
+
+
 class TestStartCyclicArHandling:
     def test_existing_ar_released_before_new_connect(self):
         h = Harness()

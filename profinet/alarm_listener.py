@@ -131,6 +131,9 @@ class AlarmListener:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._callbacks: List[Callable[[AlarmNotification], None]] = []
+        self._abort_callbacks: List[Callable[[int], None]] = []
+        #: PNIOStatus of the last RTA ERROR PDU received, or None.
+        self.last_abort_status: Optional[int] = None
         self._sock: Optional[socket.socket] = None
 
         # RTA sequence counters (APMS send side / APMR receive side).
@@ -155,6 +158,28 @@ class AlarmListener:
             callback: Function that receives AlarmNotification
         """
         self._callbacks.append(callback)
+
+    def add_abort_callback(self, callback: Callable[[int], None]) -> None:
+        """Register callback for an AR abort signalled by the device.
+
+        A device ends an AR it no longer accepts by sending an RTA ERROR PDU
+        on the alarm channel. Callbacks receive the PNIOStatus (4 bytes,
+        ErrorCode/ErrorDecode/ErrorCode1/ErrorCode2) as an int and run on the
+        listener thread.
+
+        Args:
+            callback: Function that receives the PNIOStatus
+        """
+        self._abort_callbacks.append(callback)
+
+    def remove_abort_callback(self, callback: Callable[[int], None]) -> None:
+        """Remove a registered abort callback.
+
+        Args:
+            callback: Previously registered callback to remove
+        """
+        if callback in self._abort_callbacks:
+            self._abort_callbacks.remove(callback)
 
     def remove_callback(self, callback: Callable[[AlarmNotification], None]) -> None:
         """Remove a registered callback.
@@ -360,6 +385,12 @@ class AlarmListener:
                 if pdu_type == PNRTAHeader.RTA_TYPE_ERR:
                     status = int.from_bytes(alarm_data[:4], "big") if len(alarm_data) >= 4 else 0
                     logger.error(f"RTA ERROR PDU from device, PNIOStatus=0x{status:08X}")
+                    self.last_abort_status = status
+                    for abort_callback in list(self._abort_callbacks):
+                        try:
+                            abort_callback(status)
+                        except Exception:
+                            logger.exception("Abort callback raised")
                     return
                 if pdu_type != PNRTAHeader.RTA_TYPE_DATA:
                     logger.debug(f"Ignoring RTA PDU type {pdu_type}")

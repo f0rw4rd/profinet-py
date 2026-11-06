@@ -1255,6 +1255,10 @@ class ProfinetDevice:
 
             if start_alarm_listener:
                 self.start_alarm_listener()
+                if self._alarm_listener:
+                    # A device that drops the AR says so with an RTA ERROR PDU;
+                    # surface it on the controller instead of only logging it.
+                    self._alarm_listener.add_abort_callback(cyclic.notify_ar_abort)
 
             if start_rt_before_prm_end:
                 cyclic.start()

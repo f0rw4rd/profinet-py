@@ -389,6 +389,61 @@ class TestRTAHandshake:
         )
         listener._sock.send.assert_not_called()
 
+    def test_err_pdu_invokes_abort_callbacks_with_status(self):
+        listener = make_listener()
+        seen = []
+        listener.add_abort_callback(seen.append)
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_ERR,
+                ADD_FLAGS_WINDOW_1,
+                send_seq=0xFFFE,
+                ack_seq=0xFFFE,
+                var_part=b"\xcf\x81\xfd\x18",
+            ),
+        )
+        assert seen == [0xCF81FD18]
+        assert listener.last_abort_status == 0xCF81FD18
+
+    def test_raising_abort_callback_does_not_break_the_listener(self):
+        listener = make_listener()
+        later = []
+
+        def boom(_status):
+            raise RuntimeError("boom")
+
+        listener.add_abort_callback(boom)
+        listener.add_abort_callback(later.append)
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_ERR,
+                ADD_FLAGS_WINDOW_1,
+                send_seq=0xFFFE,
+                ack_seq=0xFFFE,
+                var_part=b"\xcf\x81\xfd\x18",
+            ),
+        )
+        assert later == [0xCF81FD18]
+
+    def test_removed_abort_callback_is_not_called(self):
+        listener = make_listener()
+        seen = []
+        listener.add_abort_callback(seen.append)
+        listener.remove_abort_callback(seen.append)
+        feed(
+            listener,
+            build_rta_frame(
+                PNRTAHeader.RTA_TYPE_ERR,
+                ADD_FLAGS_WINDOW_1,
+                send_seq=0xFFFE,
+                ack_seq=0xFFFE,
+                var_part=b"\xcf\x81\xfd\x18",
+            ),
+        )
+        assert seen == []
+
     def test_wrong_version_ignored(self):
         listener = make_listener()
         feed(

@@ -312,6 +312,9 @@ class CyclicController:
         self._on_input_status: Optional[Callable[[int, int, int], None]] = None
         self._on_timeout: Optional[Callable[[], None]] = None
         self._on_error: Optional[Callable[[str], None]] = None
+        # PNIOStatus of an AR abort the device signalled via RTA ERROR PDU.
+        # Sticky until start(): an aborted AR does not come back by itself.
+        self._abort_status: Optional[int] = None
         self._on_state_change: Optional[Callable[[CyclicState, CyclicState], None]] = None
 
         # Statistics
@@ -483,6 +486,33 @@ class CyclicController:
         """
         self._on_error = callback
 
+    @property
+    def abort_status(self) -> Optional[int]:
+        """PNIOStatus of an AR abort signalled by the device, or None.
+
+        Set by notify_ar_abort(). While it is set the controller stays in
+        FAULT, even if frames keep arriving.
+        """
+        return self._abort_status
+
+    def notify_ar_abort(self, status: int) -> None:
+        """Record that the device aborted the AR (RTA ERROR PDU).
+
+        Without this the controller keeps sending and may keep reporting
+        stale input data from an AR the device has already dropped, with
+        nothing to tell the application. Enters FAULT regardless of
+        max_consecutive_timeouts and invokes the on_error callback.
+
+        Args:
+            status: PNIOStatus from the RTA ERROR PDU
+        """
+        self._abort_status = status
+        if self._state in (CyclicState.IDLE, CyclicState.STOPPING, CyclicState.STOPPED):
+            return
+        self._transition(CyclicState.FAULT)
+        if self._on_error:
+            self._on_error(f"AR aborted by device (PNIOStatus=0x{status:08X})")
+
     def on_state_change(self, callback: Callable[[CyclicState, CyclicState], None]) -> None:
         """Register callback for state transitions.
 
@@ -504,6 +534,7 @@ class CyclicController:
 
         self._transition(CyclicState.STARTING)
         self._running = True
+        self._abort_status = None
         self.stats.reset()
         self._last_rx_cycle_counter = None
 
@@ -874,7 +905,7 @@ class CyclicController:
         self.stats.consecutive_timeouts = 0
 
         # If in FAULT and we got a frame, recover to RUNNING
-        if self._state == CyclicState.FAULT:
+        if self._state == CyclicState.FAULT and self._abort_status is None:
             logger.info("Watchdog: frame received, recovering from FAULT")
             self._transition(CyclicState.RUNNING)
 

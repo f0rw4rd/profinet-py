@@ -509,6 +509,32 @@ class TestInputFrameProcessing:
         ctrl._process_input_frame(data)
         assert ctrl.state == CyclicState.RUNNING
 
+    def test_ar_abort_enters_fault_and_reports_error(self):
+        ctrl = make_controller(max_consecutive_timeouts=0)  # watchdog never FAULTs
+        ctrl._state = CyclicState.RUNNING
+        errors = []
+        ctrl.on_error(errors.append)
+        ctrl.notify_ar_abort(0xCF81FD18)
+        assert ctrl.state == CyclicState.FAULT
+        assert ctrl.abort_status == 0xCF81FD18
+        assert errors == ["AR aborted by device (PNIOStatus=0xCF81FD18)"]
+
+    def test_ar_abort_is_not_undone_by_a_late_frame(self):
+        ctrl = make_controller()
+        ctrl._state = CyclicState.RUNNING
+        ctrl.notify_ar_abort(0xCF81FD18)
+        ctrl._process_input_frame(self._build_eth_frame(ctrl, 1))
+        assert ctrl.state == CyclicState.FAULT
+
+    def test_ar_abort_before_start_only_records_the_status(self):
+        ctrl = make_controller()
+        ctrl.notify_ar_abort(0xCF81FD18)
+        assert ctrl.state == CyclicState.IDLE
+        assert ctrl.abort_status == 0xCF81FD18
+
+    def test_abort_status_is_none_by_default(self):
+        assert make_controller().abort_status is None
+
     def test_get_input_data_returns_latest(self):
         ctrl = make_controller()
         ctrl._state = CyclicState.RUNNING

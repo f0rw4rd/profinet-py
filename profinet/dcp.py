@@ -1021,10 +1021,7 @@ def set_param(
         payload=qualifier + value_bytes,
     )
 
-    # Odd-length blocks carry a pad byte, included in DCPDataLength
     block_data = bytes(block)
-    if len(value_bytes) % 2 == 1:
-        block_data += b"\x00"
     dcp = PNDCPHeader(
         DCP_GET_SET_FRAME_ID,
         PNDCPHeader.SET,

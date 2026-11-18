@@ -4,6 +4,7 @@ import pytest
 
 from profinet.exceptions import InvalidIPError, InvalidMACError
 from profinet.util import (
+    _pad_ethernet_frame,
     decode_bytes,
     ip2s,
     mac2s,
@@ -11,6 +12,24 @@ from profinet.util import (
     s2mac,
     to_hex,
 )
+
+
+class TestEthernetFramePadding:
+    """Test minimum-size padding for raw Ethernet frames."""
+
+    def test_pads_short_frame_to_wire_minimum_without_fcs(self):
+        frame = b"\x00" * 33
+
+        padded = _pad_ethernet_frame(frame)
+
+        assert len(padded) == 60
+        assert padded.startswith(frame)
+        assert padded[33:] == bytes(27)
+
+    def test_does_not_truncate_long_frame(self):
+        frame = b"\x00" * 64
+
+        assert _pad_ethernet_frame(frame) == frame
 
 
 class TestMACConversion:

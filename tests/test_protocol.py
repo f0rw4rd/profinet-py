@@ -267,6 +267,15 @@ class TestMakePacketSerialization:
         serialized = bytes(pkt)
         assert serialized == original
 
+    def test_pn_dcp_block_request_odd_length_is_padded(self):
+        """Pad odd-length request blocks without changing the length field."""
+        pkt = PNDCPBlockRequest(0x02, 0x02, 3, payload=b"abc")
+
+        assert bytes(pkt) == b"\x02\x02\x00\x03abc\x00"
+        assert pkt.length == 3
+        assert len(pkt) == len(bytes(pkt))
+        assert bytes(PNDCPBlockRequest(bytes(pkt))) == bytes(pkt)
+
     def test_pn_dcp_block_roundtrip(self):
         """Test PNDCPBlock parse -> serialize roundtrip."""
         original = (

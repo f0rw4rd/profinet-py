@@ -35,10 +35,18 @@ MAX_ETHERNET_FRAME = 1522
 PROFINET_ETHERTYPE = 0x8892
 VLAN_ETHERTYPE = 0x8100
 ETH_P_ALL = 0x0003  # Receive all Ethernet protocols
+_ETHERNET_MIN_FRAME_SIZE = 64
+_ETHERNET_FCS_SIZE = 4
 
 # Validation patterns
 MAC_PATTERN = re.compile(r"^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$")
 IP_PATTERN = re.compile(r"^(\d{1,3}\.){3}\d{1,3}$")
+
+
+def _pad_ethernet_frame(data: bytes) -> bytes:
+    """Pad an outgoing raw frame to Ethernet's minimum size before its FCS."""
+    minimum_data_size = _ETHERNET_MIN_FRAME_SIZE - _ETHERNET_FCS_SIZE
+    return data.ljust(minimum_data_size, b"\x00")
 
 
 # =============================================================================
@@ -547,6 +555,7 @@ if sys.platform == "win32":
             Raises:
                 SocketError: If the send fails
             """
+            data = _pad_ethernet_frame(data)
             buf = (ctypes.c_ubyte * len(data))(*data)
             ret = self._pcap.pcap_sendpacket(self._handle, buf, len(data))
             if ret != 0:
@@ -775,6 +784,12 @@ else:
     from fcntl import ioctl
     from socket import AF_INET, AF_PACKET, SOCK_DGRAM, SOCK_RAW, htons, socket
 
+    class _EthernetSocket(socket):
+        """AF_PACKET socket that pads transmitted frames to Ethernet minimum size."""
+
+        def send(self, data: bytes, flags: int = 0) -> int:
+            return super().send(_pad_ethernet_frame(data), flags)
+
     # ioctl constants (Linux-specific)
     SIOCGIFHWADDR = 0x8927
 
@@ -830,7 +845,7 @@ else:
         proto = ethertype if ethertype is not None else ETH_P_ALL
 
         try:
-            s = socket(AF_PACKET, SOCK_RAW, htons(proto))
+            s = _EthernetSocket(AF_PACKET, SOCK_RAW, htons(proto))
             s.bind((interface, 0))
             return s
         except PermissionError as e:

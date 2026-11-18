@@ -89,6 +89,13 @@ class PNDCPBlockRequest(
 ):
     """DCP request block."""
 
+    def __bytes__(self) -> bytes:
+        data = super().__bytes__()
+        return data + (b"\x00" if self.length % 2 else b"")
+
+    def __len__(self) -> int:
+        return super().__len__() + (self.length % 2)
+
     def parse_ip(self) -> IPConfiguration:
         """Parse IP configuration from payload."""
         return IPConfiguration(
